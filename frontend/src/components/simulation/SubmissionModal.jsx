@@ -10,7 +10,7 @@ import { motion } from "framer-motion";
  *   onSubmit      - (files, metadata) => Promise - submit handler
  *   isSubmitting  - boolean - loading state
  */
-export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting }) {
+export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting, hasEditorWork = false }) {
   const [files, setFiles] = useState([]);
   const [response, setResponse] = useState("");
   const [dragActive, setDragActive] = useState(false);
@@ -74,9 +74,9 @@ export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting 
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="submission-title">
       <motion.div
-        className="fixed inset-0 bg-black/50"
+        className="absolute inset-0 z-0 bg-black/35"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         onClick={onClose}
@@ -84,10 +84,10 @@ export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting 
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        className="bg-surface border border-border rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col"
+        className="relative z-10 bg-surface border border-border rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col"
       >
         <div className="p-4 border-b border-border flex items-center justify-between">
-          <h2 className="font-display text-lg font-semibold">
+          <h2 id="submission-title" className="font-display text-lg font-semibold">
             Submit Task: {task?.title || "Current Task"}
           </h2>
           <button onClick={onClose} className="btn-ghost">
@@ -98,19 +98,20 @@ export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting 
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 space-y-4">
           <div>
             <label className="block text-sm font-medium text-text-muted mb-2">
-              Response / Notes (optional)
+              Work summary / Notes (optional)
             </label>
             <textarea
-              className="input w-full min-h-[100px]"
+              className="input w-full min-h-[180px]"
               placeholder="Describe your approach, any challenges faced, or notes for the reviewer..."
               value={response}
               onChange={(e) => setResponse(e.target.value)}
             />
+            {hasEditorWork && <p className="mt-2 text-xs text-status-completed">Your edited workspace code will be included with this submission.</p>}
           </div>
 
           <div>
             <label className="block text-sm font-medium text-text-muted mb-2">
-              Attach Files (code, documents, screenshots, etc.)
+              Attach Files (optional: code, documents, screenshots, etc.)
             </label>
             <div
               className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
@@ -127,7 +128,7 @@ export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting 
                 onChange={handleFileSelect}
                 className="hidden"
                 id="file-upload"
-                accept=".py,.js,.ts,.jsx,.tsx,.java,.cpp,.cs,.go,.rs,.json,.yaml,.yml,.md,.txt,.pdf,.zip,.png,.jpg,.jpeg"
+                accept=".py,.js,.ts,.jsx,.tsx,.java,.cpp,.cs,.go,.rs,.json,.yaml,.yml,.md,.txt,.pdf,.zip,.png,.jpg,.jpeg,.gif"
               />
               <label htmlFor="file-upload" className="cursor-pointer">
                 <svg
@@ -147,7 +148,7 @@ export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting 
                   Drag & drop files here, or{" "}
                   <span className="text-status-todo underline">click to browse</span>
                 </p>
-                <p className="text-xs text-text-faint mt-1">Max 10 files - 10MB each</p>
+                <p className="text-xs text-text-faint mt-1">Optional · up to 10 files. Screenshots and other evidence are accepted when they help explain your work.</p>
               </label>
             </div>
 
@@ -204,8 +205,8 @@ export default function SubmissionModal({ task, onClose, onSubmit, isSubmitting 
             <button
               type="submit"
               className="btn-primary"
-              disabled={isSubmitting || (files.length === 0 && !response.trim())}
-              title={files.length === 0 && !response.trim() ? "Attach a file or add work evidence to submit." : undefined}
+              disabled={isSubmitting || (files.length === 0 && !response.trim() && !hasEditorWork)}
+              title={files.length === 0 && !response.trim() && !hasEditorWork ? "Attach a file, edit the workspace, or add work evidence to submit." : undefined}
             >
               {isSubmitting ? "Submitting..." : "Submit for Review"}
             </button>

@@ -63,7 +63,7 @@ function computeDiff(original, updated) {
   return result;
 }
 
-export default function DiffViewer({ original, updated }) {
+export default function DiffViewer({ original, updated, readOnly = false }) {
   const [origText, setOrigText] = useState(original || SAMPLE_ORIGINAL);
   const [updText, setUpdText] = useState(updated || SAMPLE_CHANGES);
   const diff = computeDiff(origText, updText);
@@ -128,6 +128,7 @@ export default function DiffViewer({ original, updated }) {
         <textarea
           value={origText}
           onChange={(e) => setOrigText(e.target.value)}
+          readOnly={readOnly}
           placeholder="Original code..."
           className="flex-1 bg-[#1a1a2e] text-[#d4d4d4] p-2 rounded text-[11px] font-mono resize-none border border-border/20 outline-none"
           rows={3}
@@ -135,6 +136,7 @@ export default function DiffViewer({ original, updated }) {
         <textarea
           value={updText}
           onChange={(e) => setUpdText(e.target.value)}
+          readOnly={readOnly}
           placeholder="Updated code..."
           className="flex-1 bg-[#1a1a2e] text-[#d4d4d4] p-2 rounded text-[11px] font-mono resize-none border border-border/20 outline-none"
           rows={3}

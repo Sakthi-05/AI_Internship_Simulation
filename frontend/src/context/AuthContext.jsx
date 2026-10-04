@@ -14,8 +14,18 @@ export function AuthProvider({ children }) {
   const [auth, setAuth] = useState(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
+      const stored = raw ? JSON.parse(raw) : null;
+      if (!stored?.token || !stored?.studentId) {
+        localStorage.removeItem(STORAGE_KEY);
+        setAuthToken(null);
+        return null;
+      }
+      // Restore the interceptor token before child effects issue authenticated requests.
+      setAuthToken(stored.token);
+      return stored;
     } catch {
+      localStorage.removeItem(STORAGE_KEY);
+      setAuthToken(null);
       return null;
     }
   });
@@ -32,6 +42,7 @@ export function AuthProvider({ children }) {
 
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem("aiwse:simulation");
+      setAuthToken(null);
       setAuth(null);
     });
 
@@ -41,6 +52,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const applySession = useCallback((data) => {
+    setAuthToken(data.access_token);
     const next = persist({
       token: data.access_token,
       studentId: data.student_id,
@@ -74,6 +86,7 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem("aiwse:simulation");
+    setAuthToken(null);
     setAuth(null);
   }, []);
 

@@ -107,9 +107,8 @@ export function useSubmitSimulationTask(simulationId) {
       if (metadata) {
         formData.append("metadata", JSON.stringify(metadata));
       }
-      const res = await apiClient.post(`/api/simulations/${simulationId}/tasks/${taskId}/submit`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // Let the browser attach the multipart boundary required by FastAPI.
+      const res = await apiClient.post(`/api/simulations/${simulationId}/tasks/${taskId}/submit`, formData);
       return res.data;
     },
     onSuccess: () => {

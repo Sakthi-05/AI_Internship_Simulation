@@ -251,6 +251,30 @@ class TestApiCannotBypassLocking:
 
 
 class TestBoardLockStatus:
+    def test_submitted_workspace_task_is_same_task_on_simulation_board(self, client, auth_headers):
+        data = _create_simulation_via_db(client, auth_headers)
+        sim_id = data["simulation_id"]
+        project_id = data["project_id"]
+        client.post(f"/api/simulations/{sim_id}/start", headers=auth_headers)
+        current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers).json()
+        task_id = current["task_id"]
+        assert client.post(f"/api/simulations/{sim_id}/tasks/{task_id}/start", headers=auth_headers).status_code == 200
+        submitted = client.post(
+            f"/api/simulations/{sim_id}/tasks/{task_id}/submit",
+            headers=auth_headers,
+            data={"metadata": '{"response":"test evidence"}'},
+        )
+        assert submitted.status_code == 201, submitted.text
+        assert submitted.json()["task_id"] == task_id
+
+        board = client.get(
+            f"/api/projects/{project_id}/board?simulation_id={sim_id}", headers=auth_headers
+        ).json()
+        submitted_cards = board["submitted"]
+        matching = [item for item in submitted_cards if item["id"] == task_id]
+        assert len(matching) == 1
+        assert matching[0]["title"] == current["title"]
+
     def test_board_includes_lock_status(self, client, auth_headers):
         """Test: Board endpoint returns lock status when simulation_id is provided."""
         data = _create_simulation_via_db(client, auth_headers)

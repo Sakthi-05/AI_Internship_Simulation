@@ -1,13 +1,26 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
-.env
-storage/submissions/
 *.egg-info/
 .pytest_cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime/user-generated files
+storage/submissions/
+
+# Node
 node_modules/
 dist/
 build/
-.DS_Store
+
+# Local files
 *.local
+
+# OS
+.DS_Store

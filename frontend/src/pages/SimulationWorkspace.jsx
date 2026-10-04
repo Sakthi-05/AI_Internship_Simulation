@@ -17,7 +17,7 @@ import {
   useTaskEvents,
   useRespondToEvent,
 } from "../hooks/useSimulationApi";
-import { useCompany, useProject } from "../hooks/useApi";
+import { useCompany, useProject, useGenerateSimulation } from "../hooks/useApi";
 import { useAuth } from "../context/AuthContext";
 import LoadingScreen from "../components/LoadingScreen";
 import ScenarioPanel from "../components/simulation/ScenarioPanel";
@@ -28,7 +28,8 @@ import SimulationChatPanel from "../components/simulation/SimulationChatPanel";
 import AdaptiveInteractionPanel from "../components/simulation/AdaptiveInteractionPanel";
 
 export default function SimulationWorkspace() {
-  const { simulation, setSimulation, clearSimulation } = useSimulation();
+  const { simulation, setSimulation } = useSimulation();
+  const { auth } = useAuth();
   const simulationId = simulation?.id;
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -48,6 +49,7 @@ export default function SimulationWorkspace() {
   const startTask = useStartSimulationTask(simulationId);
   const submitTask = useSubmitSimulationTask(simulationId);
   const completeTask = useCompleteSimulationTask(simulationId);
+  const generateSimulation = useGenerateSimulation();
   
   // Events
   const { data: eventsData, isLoading: eventsLoading } = useTaskEvents(
@@ -107,6 +109,37 @@ export default function SimulationWorkspace() {
     }
   };
 
+  const createNewSimulation = async () => {
+    const profile = await apiClient.get("/api/students/me");
+    const recommendation = profile.data?.recommended_parameters;
+    if (!recommendation || !auth?.studentId) {
+      throw new Error("Complete your assessment before generating a new internship.");
+    }
+    const result = await generateSimulation.mutateAsync({
+      student_id: auth.studentId,
+      role: recommendation.role,
+      technology_stack: recommendation.technology_stack,
+      difficulty: recommendation.difficulty,
+      company_type: recommendation.company_type,
+    });
+    // Switch active simulation only after generation succeeded. The old records
+    // remain in the backend and are no longer the active context.
+    setSimulation({
+      companyId: result.company_id,
+      projectId: result.project_id,
+      id: result.simulation_id,
+      title: result.title,
+      description: result.description,
+      role: result.role,
+      difficulty: result.difficulty,
+      duration_weeks: result.duration_weeks,
+      total_tasks: result.task_count,
+      status: "not_started",
+    });
+    setSimulationCompleted(false);
+    navigate("/simulation");
+  };
+
   // Handle task submission
   const handleSubmitTask = async (files, metadata) => {
     setActionError("");
@@ -118,6 +151,17 @@ export default function SimulationWorkspace() {
       queryClient.invalidateQueries({ queryKey: ["currentScenario", simulationId] });
       queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] });
       queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
+      if (result.version_id && simulation?.projectId) {
+        try {
+          await apiClient.post(`/api/projects/${simulation.projectId}/reviews/versions/${result.version_id}`);
+        } catch (reviewError) {
+          const reviewDetail = reviewError?.response?.data?.detail;
+          setActionError(`Work was submitted, but its review could not start: ${typeof reviewDetail === "string" ? reviewDetail : reviewError.message || "Please retry the review."}`);
+        }
+        queryClient.invalidateQueries({ queryKey: ["board", simulation?.projectId] });
+        queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
+        queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] });
+      }
       // Check if simulation completed
       if (result.simulation_completed || result.status === "simulation_completed") {
         setSimulationCompleted(true);
@@ -125,7 +169,7 @@ export default function SimulationWorkspace() {
       return result;
     } catch (error) {
       const detail = error?.response?.data?.detail;
-      setActionError(typeof detail === "string" ? detail : "Failed to submit task. Please try again.");
+      setActionError(typeof detail === "string" ? detail : error?.message || "Failed to submit task. Please try again.");
     }
   };
 
@@ -184,10 +228,7 @@ export default function SimulationWorkspace() {
         simulation={sim}
         progress={progress}
         company={company}
-        onNewSimulation={() => {
-          clearSimulation();
-          setSimulationCompleted(false);
-        }}
+        onNewSimulation={createNewSimulation}
       />
     );
   }
@@ -206,10 +247,7 @@ export default function SimulationWorkspace() {
           simulation={sim}
           progress={progress}
           company={company}
-          onNewSimulation={() => {
-            clearSimulation();
-            setSimulationCompleted(false);
-          }}
+          onNewSimulation={createNewSimulation}
         />
       );
     }
@@ -281,7 +319,7 @@ export default function SimulationWorkspace() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl p-4 space-y-4 h-[calc(100vh-80px)] overflow-hidden flex flex-col">
+    <div className="mx-auto max-w-[1600px] p-4 space-y-4 min-h-[calc(100vh-80px)]">
       {/* Progress Bar at top */}
       <ProgressIndicator
         simulation={sim}
@@ -295,19 +333,8 @@ export default function SimulationWorkspace() {
         </div>
       )}
 
-      <div className="flex-1 flex overflow-hidden space-x-4">
-        {/* Left Panel: Scenario Context */}
-        <div className="w-96 flex-shrink-0">
-          <ScenarioPanel
-            scenario={scenario}
-            simulation={sim}
-            progress={progress}
-            company={company}
-          />
-        </div>
-
-        {/* Center Panel: Current Task */}
-        <div className="flex-1 min-w-0 overflow-y-auto">
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,0.8fr)]">
+        <main className="min-w-0">
           <TaskPanel
             task={currentTask}
             scenario={scenario}
@@ -319,29 +346,37 @@ export default function SimulationWorkspace() {
             setShowSubmissionModal={setShowSubmissionModal}
             isStarting={startTask.isPending}
             isSubmitting={submitTask.isPending}
-            canStart={currentTask.status === "todo"}
+            canStart={["todo", "changes_requested"].includes(currentTask.status)}
             canSubmit={currentTask.status === "in_progress"}
           />
-        </div>
+        </main>
 
-        {/* Right Panel: Workplace Events + Chat */}
-        <div className="w-80 flex-shrink-0 flex flex-col space-y-4 overflow-hidden">
-          <div className="flex-1 min-h-0">
+        <aside className="min-w-0 space-y-4">
+          <div>
+            <ScenarioPanel
+              scenario={scenario}
+              simulation={sim}
+              progress={progress}
+              company={company}
+            />
+          </div>
+          <div className="h-[280px]">
             <WorkplaceEventPanel
               events={events}
               activeEvent={activeEvent}
               currentTask={currentTask}
               onRespond={handleEventResponse}
               isResponding={respondToEvent.isPending}
+              suppressModal={showSubmissionModal}
             />
           </div>
-          <div className="h-[380px] flex-shrink-0">
+          <div>
             <AdaptiveInteractionPanel simulationId={simulationId} />
           </div>
-          <div className="h-64 flex-shrink-0">
+          <div className="h-[380px]">
             <SimulationChatPanel companyId={simulation?.companyId} />
           </div>
-        </div>
+        </aside>
       </div>
     </div>
   );
@@ -458,6 +493,20 @@ function SimulationSelectionScreen({ onStartSimulation }) {
  * Simulation completion screen
  */
 function SimulationCompletionScreen({ simulation, progress, company, onNewSimulation }) {
+  const [confirmNew, setConfirmNew] = useState(false);
+  const [newSimulationError, setNewSimulationError] = useState("");
+  const [creatingNew, setCreatingNew] = useState(false);
+  const confirmStartNew = async () => {
+    setCreatingNew(true);
+    setNewSimulationError("");
+    try {
+      await onNewSimulation();
+    } catch (error) {
+      setNewSimulationError(error?.response?.data?.detail || error.message || "Could not create a new simulation.");
+    } finally {
+      setCreatingNew(false);
+    }
+  };
   const durationMinutes = simulation?.started_at && simulation?.completed_at
     ? Math.round((new Date(simulation.completed_at) - new Date(simulation.started_at)) / 60000)
     : 0;
@@ -502,7 +551,7 @@ function SimulationCompletionScreen({ simulation, progress, company, onNewSimula
         </div>
 
         <div className="space-y-3">
-          <button className="btn-primary w-full py-3" onClick={onNewSimulation}>
+          <button className="btn-primary w-full py-3" onClick={() => setConfirmNew(true)}>
             Start New Simulation
           </button>
           <a href="/dashboard" className="btn-ghost w-full py-3 block">
@@ -510,6 +559,7 @@ function SimulationCompletionScreen({ simulation, progress, company, onNewSimula
           </a>
         </div>
       </motion.div>
+      {confirmNew && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-4" role="dialog" aria-modal="true" aria-labelledby="new-simulation-title"><div className="card w-full max-w-lg space-y-4 p-6"><h2 id="new-simulation-title" className="font-display text-xl font-semibold">Start a New Simulation?</h2><p className="text-sm leading-6 text-text-muted">This creates a separate internship simulation. Your current simulation and its progress will be preserved.</p>{newSimulationError && <p className="text-sm text-status-blocked" role="alert">{newSimulationError}</p>}<div className="flex justify-end gap-3"><button className="btn-ghost" onClick={() => { setConfirmNew(false); setNewSimulationError(""); }} disabled={creatingNew}>Cancel</button><button className="btn-primary" onClick={confirmStartNew} disabled={creatingNew}>{creatingNew ? "Creating..." : "Start New Simulation"}</button></div></div></div>}
     </div>
   );
 }

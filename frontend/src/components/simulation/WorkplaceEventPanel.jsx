@@ -1,9 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import EventResponseModal from "./EventResponseModal";
 
-export default function WorkplaceEventPanel({ events, activeEvent, currentTask, onRespond, isResponding }) {
+export default function WorkplaceEventPanel({ events, activeEvent, currentTask, onRespond, isResponding, suppressModal = false }) {
   const [respondingToEvent, setRespondingToEvent] = useState(null);
+  useEffect(() => {
+    if (suppressModal) setRespondingToEvent(null);
+  }, [suppressModal]);
   if (!events || events.length === 0) {
     return (
       <div className="card h-full flex flex-col">
@@ -160,7 +163,7 @@ export default function WorkplaceEventPanel({ events, activeEvent, currentTask, 
       </div>
 
       {/* Event Response Modal */}
-      {respondingToEvent && respondingToEvent.action_required && respondingToEvent.status === "pending" && (
+      {!suppressModal && respondingToEvent && respondingToEvent.action_required && respondingToEvent.status === "pending" && (
         <EventResponseModal
           event={respondingToEvent}
           onClose={() => setRespondingToEvent(null)}

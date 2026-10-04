@@ -178,6 +178,11 @@ async def submit_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot submit task from '{task.status.value}'. Must be IN_PROGRESS."
         )
+    if task.started_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Task must be started before it can be submitted.",
+        )
 
     # Parse metadata
     import json

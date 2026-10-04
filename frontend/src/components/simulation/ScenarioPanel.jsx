@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 export default function ScenarioPanel({ scenario, simulation, progress, company }) {
   if (!scenario) {
     return (
-      <div className="card h-full p-4 flex flex-col">
+      <div className="card p-4 flex flex-col">
         <div className="text-center text-text-muted py-8">
           <p>No active scenario</p>
         </div>
@@ -17,7 +17,7 @@ export default function ScenarioPanel({ scenario, simulation, progress, company 
   const scenarioProgressPct = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   return (
-    <div className="card h-full flex flex-col overflow-hidden">
+    <div className="card flex flex-col">
       {/* Scenario Header */}
       <div className="p-4 border-b border-border">
         <div className="flex items-start justify-between gap-3">

@@ -13,10 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
-from app.models.enums import CompanyType, DifficultyLevel, SimulationStatus
+from app.models.enums import CompanyType, DifficultyLevel, ScenarioStatus, SimulationStatus
 from app.models.intelligence import StudentProfile
 from app.models.project_state import ProjectState
-from app.models.simulation import Simulation
+from app.models.simulation import Scenario, ScenarioTask, Simulation
 from app.schemas.generation import GenerationRequest, GenerationResponse
 from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.generators.company_generator import generate_company
@@ -105,6 +105,7 @@ async def generate_internship_simulation(
         )
         db.add(simulation)
         db.flush()
+        _link_workplace_scenario(db, simulation, project, tasks, role, difficulty, technology_stack)
 
         task_count = len(tasks)
 
@@ -117,13 +118,51 @@ async def generate_internship_simulation(
         company_id=company.id,
         project_id=project.id,
         simulation_id=simulation.id,
+        title=simulation.title,
+        description=simulation.description,
         sprint_ids=[s.id for s in sprints],
         task_count=task_count,
+        duration_weeks=simulation.duration_weeks,
         difficulty=difficulty,
         role=role,
         company_type=company_type,
         focus_competencies=focus,
     )
+
+
+def _link_workplace_scenario(db, simulation, project, tasks, role, difficulty, technology_stack):
+    """Attach one workplace scenario so scenario events can run. Skip if one already exists."""
+    existing = db.execute(
+        select(Scenario).where(Scenario.simulation_id == simulation.id).order_by(Scenario.sequence)
+    ).scalars().first()
+    if existing is not None:
+        if simulation.current_scenario_id is None:
+            simulation.current_scenario_id = existing.id
+            db.add(simulation)
+            db.flush()
+        return existing
+
+    scenario = Scenario(
+        simulation_id=simulation.id,
+        sequence=1,
+        sequence_order=1,
+        title=f"{project.title} workplace",
+        description=f"Workplace scenario for the {role} internship.",
+        workplace_context=f"You are the {role} on {project.title}. Complete the assigned work and respond to workplace events.",
+        role=role,
+        difficulty=difficulty,
+        required_skills=list(technology_stack or [])[:8],
+        objectives=list(project.objectives or [])[:6] or [f"Complete the {role} internship tasks"],
+        status=ScenarioStatus.PENDING,
+    )
+    db.add(scenario)
+    db.flush()
+    for index, task in enumerate(tasks, start=1):
+        db.add(ScenarioTask(scenario_id=scenario.id, task_id=task.id, sequence=index))
+    simulation.current_scenario_id = scenario.id
+    db.add(simulation)
+    db.flush()
+    return scenario
 
 
 def _resolve_generation_inputs(db, payload: GenerationRequest):

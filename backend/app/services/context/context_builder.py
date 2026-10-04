@@ -148,32 +148,40 @@ def build_task_context(db: Session, task: Task) -> Dict[str, Any]:
 
 
 def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str, Any]:
-    """Build complete context for AI review of a specific submission version."""
+    """Context for the current submission only: task, criteria, stack, and one prior review."""
     task = version.submission.task
-    
-    # Get project context
-    project_context = build_project_context(db, task.sprint.project)
-    
-    # Get task context with submission history
-    task_context = build_task_context(db, task)
-    
-    # Extract current submission content
+    project = task.sprint.project
     from app.services.content_extraction import extract_all_submission_files
     from app.services.file_storage import FileStorageService
+    from app.models.submission import AIReview
+
     storage_service = FileStorageService()
     current_content = extract_all_submission_files(version.files, storage_service) if version.files else "No files submitted."
-    
-    # Merge all contexts
-    context = {**project_context, **task_context}
-    context.update({
+    if len(current_content) > 3500:
+        current_content = current_content[:3500] + "\n[truncated]"
+
+    previous_review = ""
+    prior = db.execute(
+        select(AIReview)
+        .join(SubmissionVersion, SubmissionVersion.id == AIReview.version_id)
+        .where(
+            SubmissionVersion.submission_id == version.submission_id,
+            SubmissionVersion.id != version.id,
+        )
+        .order_by(AIReview.created_at.desc())
+    ).scalars().first()
+    if prior and prior.summary:
+        previous_review = prior.summary[:300]
+
+    return {
+        "task_title": task.title,
+        "task_description": (task.description or "")[:500],
+        "acceptance_criteria": list(task.acceptance_criteria or [])[:8],
+        "technology_stack": list(project.technology_stack or [])[:6],
+        "previous_review": previous_review,
         "current_submission": {
             "version_number": version.version_number,
-            "submitted_at": version.submitted_at.isoformat() if version.submitted_at else None,
-            "files": version.files,
-            "metadata": version.version_metadata,
             "content": current_content,
         },
-        "submission_content": current_content,  # For backward compatibility with prompt builder
-    })
-    
-    return context
+        "submission_content": current_content,
+    }

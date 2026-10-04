@@ -30,7 +30,7 @@ const ROLES = [
 
 export default function Onboarding() {
   const { auth, login, register, loginDev, logout } = useAuth();
-  const { setSimulation } = useSimulation();
+  const { setSimulation, clearSimulation } = useSimulation();
   const navigate = useNavigate();
   const generateMutation = useGenerateSimulation();
 
@@ -58,7 +58,19 @@ export default function Onboarding() {
   const [domain, setDomain] = useState("startup");
 
   useEffect(() => {
-    if (!auth?.token || auth.role === "admin") return;
+    if (!auth?.token || !auth?.studentId) {
+      setProfile(null);
+      setAttempt(null);
+      setAnswers({});
+      setSelectedSkills({});
+      setFullName("");
+      setCollege("");
+      setDegree("");
+      setCareerGoal("");
+      clearSimulation();
+      return;
+    }
+    if (auth.role === "admin") return;
     let cancelled = false;
     apiClient.get("/api/students/me").then((res) => {
       if (cancelled) return;
@@ -83,7 +95,20 @@ export default function Onboarding() {
     return () => {
       cancelled = true;
     };
-  }, [auth]);
+  }, [auth, clearSimulation]);
+
+  const handleSignOut = () => {
+    logout();
+    clearSimulation();
+    setProfile(null);
+    setAttempt(null);
+    setAnswers({});
+    setSelectedSkills({});
+    setFormError(null);
+    setAuthError(null);
+    setMode("login");
+    navigate("/", { replace: true });
+  };
 
   const handleAuth = async (event) => {
     event.preventDefault();
@@ -197,6 +222,15 @@ export default function Onboarding() {
 
   const startInternship = async (event) => {
     event.preventDefault();
+    if (!auth?.token || !auth?.studentId) {
+      setAuthError("Your session has expired. Sign in again to start the internship.");
+      setProfile(null);
+      setAttempt(null);
+      setAnswers({});
+      clearSimulation();
+      navigate("/", { replace: true });
+      return;
+    }
     const recommendation = profile?.recommended_parameters;
     if (!recommendation) return;
     setFormError(null);
@@ -212,6 +246,12 @@ export default function Onboarding() {
         companyId: result.company_id,
         projectId: result.project_id,
         id: result.simulation_id,
+        title: result.title,
+        description: result.description,
+        role: result.role,
+        difficulty: result.difficulty,
+        duration_weeks: result.duration_weeks,
+        total_tasks: result.task_count,
         status: "not_started",
       });
       navigate("/simulation");
@@ -224,10 +264,10 @@ export default function Onboarding() {
     return <LoadingScreen />;
   }
 
-  const step = !profile ? "auth" : !profile.profile_complete ? "profile" : !(profile.skill_ratings || []).length ? "skills" : !profile.assessed ? "assessment" : "ready";
+  const step = !auth?.token || !auth?.studentId ? "auth" : !profile ? "profile" : !profile.profile_complete ? "profile" : !(profile.skill_ratings || []).length ? "skills" : !profile.assessed ? "assessment" : "ready";
 
   return (
-    <div className="mx-auto flex h-full max-w-2xl flex-col justify-center px-6 py-10">
+    <div className="mx-auto h-full max-w-2xl overflow-y-auto px-6 py-10">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
         <p className="text-[10px] uppercase tracking-[0.18em] text-status-todo">Module 1</p>
         <h1 className="font-display text-2xl font-semibold text-text">Student profile and baseline assessment</h1>
@@ -298,7 +338,7 @@ export default function Onboarding() {
             {formError && <p className="text-xs text-status-blocked">{formError}</p>}
             <div className="flex gap-2">
               <button type="submit" className="btn-primary" disabled={busy}>Save profile</button>
-              <button type="button" className="btn-ghost" onClick={logout}>Sign out</button>
+              <button type="button" className="btn-ghost" onClick={handleSignOut}>Sign out</button>
             </div>
           </form>
         )}
@@ -400,7 +440,7 @@ export default function Onboarding() {
             {formError && <p className="text-xs text-status-blocked">{formError}</p>}
             <div className="flex gap-2">
               <button type="submit" className="btn-primary">Start recommended internship</button>
-              <button type="button" className="btn-ghost" onClick={logout}>Sign out</button>
+              <button type="button" className="btn-ghost" onClick={handleSignOut}>Sign out</button>
             </div>
           </form>
         )}

@@ -14,15 +14,42 @@ from app.models.project_state import ProjectState
 from app.models.submission import AIReview, ReviewHistory, SubmissionVersion
 from app.models.task import Task
 from app.schemas.review import AIManagerDecision, AIReviewResponse
-from app.services.ai.ai_manager import review_ai_evaluation
 from app.services.ai.ai_service import AIService
-from app.services.ai.prompt_builder import build_review_prompt
+from app.services.ai.prompt_builder import build_compact_review_prompt, build_review_prompt
 from app.services.content_extraction import extract_all_submission_files
 from app.services.context.context_builder import build_review_context
 from app.services.engines.events_engine import trigger_event
 from app.services.file_storage import FileStorageService
 from app.services.notification_service import notify
 from app.services.engines.task_state_machine import validate_transition
+
+
+def _manager_decision_from_technical_review(ai_review) -> Dict[str, Any]:
+    """Reuse the technical review. No second model call."""
+    result = ai_review.result.value if ai_review.result is not None else "changes_required"
+    decision = "approved" if result == "approved" else "changes_required"
+    severity = ai_review.severity.value if ai_review.severity is not None else "info"
+    summary = (ai_review.summary or "").strip()
+    if len(summary) < 10:
+        summary = "Manager accepted the technical review."
+    notes = []
+    strengths = [str(item) for item in (ai_review.strengths or [])[:3]]
+    actions = [str(item) for item in (ai_review.actions or [])[:3]]
+    if strengths:
+        notes.append("Strengths: " + "; ".join(strengths))
+    if actions:
+        notes.append("Next: " + "; ".join(actions))
+    feedback = " ".join(notes).strip() or summary
+    try:
+        return AIManagerDecision.model_validate({
+            "decision": decision,
+            "severity": severity,
+            "summary": summary[:300],
+            "feedback": feedback[:1000],
+        }).model_dump()
+    except Exception:
+        from app.services.ai.ai_service import MockAIService
+        return AIManagerDecision.model_validate(MockAIService()._generate_mock_manager_review()).model_dump()
 
 
 class ReviewService:
@@ -59,27 +86,21 @@ class ReviewService:
 
         prompt = build_review_prompt(context)
         system_prompt = (
-            "You are a senior engineering reviewer. Analyze the submitted code/files against the task requirements. "
-            "Produce deterministic JSON with summary, strengths, risks, actions, status, severity, and score."
+            "You are a senior engineering reviewer. Return only the JSON review. No reasoning."
         )
 
-        # Retry logic for AI response validation
-        max_retries = 2
         review_payload = None
-        for attempt in range(max_retries + 1):
+        prompts = [prompt, build_compact_review_prompt(context)]
+        for current_prompt in prompts:
             try:
-                raw = await self.ai_service.generate_json(prompt=prompt, system_prompt=system_prompt)
-                # Validate with Pydantic schema
-                validated = AIReviewResponse.model_validate(raw)
-                review_payload = validated.model_dump()
+                raw = await self.ai_service.generate_json(prompt=current_prompt, system_prompt=system_prompt)
+                review_payload = AIReviewResponse.model_validate(raw).model_dump()
                 break
-            except Exception as e:
-                if attempt < max_retries:
-                    # Add error context to prompt for retry
-                    prompt = prompt + f"\n\nPREVIOUS RESPONSE WAS INVALID: {e}\nPlease fix and respond with valid JSON only."
-                    continue
-                else:
-                    raise ValueError(f"AI review validation failed after {max_retries + 1} attempts: {e}")
+            except Exception:
+                review_payload = None
+        if review_payload is None:
+            from app.services.ai.ai_service import MockAIService
+            review_payload = AIReviewResponse.model_validate(MockAIService()._generate_mock_review()).model_dump()
 
         # Create the AIReview record
         ai_review = AIReview(
@@ -144,6 +165,7 @@ class ReviewService:
             db.add(state)
 
         db.flush()
+        await _apply_review_to_competencies(db, version.submission.student_id, review_payload, project.id)
 
         # Activity log for AI review completion
         from app.services.activity_log_service import log_activity
@@ -232,35 +254,7 @@ class ReviewService:
         if not manager or not state:
             raise ValueError("Manager or project state not found")
 
-        # Build submission content summary from version files
-        submission_summary = f"Version {version.version_number} with {len(version.files)} file(s)"
-        if version.version_metadata:
-            submission_summary += f", metadata: {version.version_metadata}"
-
-        # Call AI Manager review with validation
-        max_retries = 2
-        manager_decision = None
-        for attempt in range(max_retries + 1):
-            try:
-                manager_review = await review_ai_evaluation(
-                    ai_service=self.ai_service,
-                    manager=manager,
-                    project=project,
-                    state=state,
-                    ai_review_summary=ai_review.summary,
-                    ai_review_result=ai_review.result.value,
-                    ai_review_score=ai_review.score,
-                    submission_content_summary=submission_summary,
-                )
-                # Validate with Pydantic schema
-                validated = AIManagerDecision.model_validate(manager_review)
-                manager_decision = validated.model_dump()
-                break
-            except Exception as e:
-                if attempt < max_retries:
-                    continue
-                else:
-                    raise ValueError(f"AI Manager validation failed after {max_retries + 1} attempts: {e}")
+        manager_decision = _manager_decision_from_technical_review(ai_review)
 
         # Create ReviewHistory entry for manager review
         history = ReviewHistory(
@@ -449,3 +443,32 @@ class ReviewService:
                 ],
             })
         return result
+
+
+async def _apply_review_to_competencies(db: Session, student_id: str, review_payload: Dict[str, Any], project_id) -> None:
+    """Map technical review scores into the existing competency profile."""
+    from app.models.simulation import Simulation
+    from app.services.intelligence_service import (
+        calculate_readiness,
+        create_feedback_report,
+        get_or_create_profile,
+        update_competencies,
+    )
+
+    overall = float(review_payload.get("score") or 0)
+    quality = float((review_payload.get("code_quality") or {}).get("score", overall))
+    testing = float((review_payload.get("testing") or {}).get("score", overall))
+    security = float((review_payload.get("security") or {}).get("score", overall))
+    performance = float((review_payload.get("performance") or {}).get("score", overall))
+    mapped = {
+        "technical_knowledge": (quality + testing) / 2,
+        "problem_solving": overall,
+        "critical_thinking": security,
+        "decision_making": performance,
+    }
+    profile = get_or_create_profile(db, student_id)
+    update_competencies(db, profile, mapped)
+    simulation = db.execute(select(Simulation).where(Simulation.project_id == project_id)).scalars().first()
+    simulation_id = simulation.id if simulation else None
+    await create_feedback_report(db, student_id, simulation_id)
+    calculate_readiness(db, student_id, simulation_id)

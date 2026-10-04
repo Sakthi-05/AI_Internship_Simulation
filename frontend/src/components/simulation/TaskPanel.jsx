@@ -24,11 +24,7 @@ export default function TaskPanel({
   const [remainingTime, setRemainingTime] = useState(task?.remaining_time);
   const [deadlineMissed, setDeadlineMissed] = useState(task?.deadline_missed);
   const [editorCode, setEditorCode] = useState("");
-
-  // Keep editor draft scoped to the current task so switching tasks never leaks code.
-  useEffect(() => {
-    setEditorCode("");
-  }, [task?.task_id]);
+  const [hasEditorWork, setHasEditorWork] = useState(false);
 
   // Merge the CodeEditor draft into submission metadata so code counts as work evidence.
   const handleSubmitWithCode = (files, metadata) => {
@@ -126,10 +122,11 @@ export default function TaskPanel({
   };
 
   return (
-    <div className="card h-full flex flex-col overflow-hidden">
+    <div className="card flex flex-col">
       <div className="p-4 border-b border-border bg-surface-2/50">
         <div className="flex items-start justify-between gap-3 mb-3">
           <div className="flex-1 min-w-0">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-status-todo">Current Task</p>
             <div className="flex items-center gap-2 flex-wrap mb-2">
               <span className={`px-2 py-0.5 rounded text-xs font-mono uppercase tracking-wide border ${statusColors[task.status]}`}>
                 {statusLabels[task.status] || task.status}
@@ -182,7 +179,7 @@ export default function TaskPanel({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
+      <div className="p-4 space-y-6">
         <section>
           <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint mb-3">
             Instructions
@@ -209,6 +206,31 @@ export default function TaskPanel({
                 </li>
               ))}
             </ul>
+          </section>
+        )}
+
+        {CODING_TASK_TYPES.includes(task.task_type) && task.status !== "completed" && (
+          <section className="space-y-3">
+            <div>
+              <h3 className="font-display text-sm font-semibold uppercase tracking-wide text-status-todo">
+                Your Work
+              </h3>
+                <p className="mt-1 text-sm text-text-muted">{canSubmit ? "Write your solution here. Your editor draft is saved for this task and included when you submit." : "Start the task to unlock the workspace and begin the timer."}</p>
+            </div>
+            {CODE_REVIEW_TYPES.includes(task.task_type) ? (
+              <div className="h-[440px]"><DiffViewer readOnly={!canSubmit} /></div>
+            ) : (
+              <div className="h-[440px]">
+                <CodeEditor
+                  key={`${project?.id || simulation?.project_id || "noproject"}-${task.task_id}`}
+                  task={task}
+                  project={project}
+                  onCodeChange={setEditorCode}
+                  onWorkChange={setHasEditorWork}
+                  readOnly={!canSubmit}
+                />
+              </div>
+            )}
           </section>
         )}
 
@@ -248,30 +270,9 @@ export default function TaskPanel({
           </dl>
         </section>
 
-        {CODING_TASK_TYPES.includes(task.task_type) && task.status !== "completed" && (
-          <section className="min-h-[300px]">
-            <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint mb-3">
-              {CODE_REVIEW_TYPES.includes(task.task_type) ? "Code Review" : "Code Editor"}
-            </h3>
-            {CODE_REVIEW_TYPES.includes(task.task_type) ? (
-              <div className="h-[300px]">
-                <DiffViewer />
-              </div>
-            ) : (
-              <div className="h-[300px]">
-                <CodeEditor
-                  key={`${project?.id || simulation?.project_id || "noproject"}-${task.task_id}`}
-                  task={task}
-                  project={project}
-                  onCodeChange={setEditorCode}
-                />
-              </div>
-            )}
-          </section>
-        )}
       </div>
 
-      <div className="p-4 border-t border-border bg-surface-2/50 space-y-3">
+      <div className="sticky bottom-0 z-10 p-4 border-t border-border bg-surface/95 backdrop-blur space-y-3">
         {canStart && (
           <motion.button
             whileHover={{ scale: 1.02 }}
@@ -355,6 +356,7 @@ export default function TaskPanel({
           onClose={() => setShowSubmissionModal(false)}
           onSubmit={handleSubmitWithCode}
           isSubmitting={isSubmitting}
+          hasEditorWork={hasEditorWork}
         />
       )}
     </div>
