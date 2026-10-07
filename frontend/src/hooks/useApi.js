@@ -108,6 +108,9 @@ export function useManagerChat(companyId) {
     queryKey: ["chat", "manager", companyId],
     queryFn: async () => (await apiClient.get(`/api/companies/${companyId}/chat/manager`)).data,
     enabled: Boolean(companyId),
+    // Polling fallback so proactive manager check-ins appear over time even
+    // when the WebSocket feed drops. WS pushes invalidate ["chat"] immediately.
+    refetchInterval: 15000,
   });
   const send = useMutation({
     mutationFn: async (content) =>
@@ -123,6 +126,8 @@ export function useTeamChat(companyId, teammateId) {
     queryKey: ["chat", "team", companyId, teammateId],
     queryFn: async () => (await apiClient.get(`/api/companies/${companyId}/chat/team/${teammateId}`)).data,
     enabled: Boolean(companyId) && Boolean(teammateId),
+    // Same polling fallback as the manager thread for teammate check-ins.
+    refetchInterval: 15000,
   });
   const send = useMutation({
     mutationFn: async (content) =>

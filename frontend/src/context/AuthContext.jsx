@@ -14,8 +14,18 @@ export function AuthProvider({ children }) {
   const [auth, setAuth] = useState(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
+      const stored = raw ? JSON.parse(raw) : null;
+      if (!stored?.token || !stored?.studentId) {
+        localStorage.removeItem(STORAGE_KEY);
+        setAuthToken(null);
+        return null;
+      }
+      // Restore the interceptor token before child effects issue authenticated requests.
+      setAuthToken(stored.token);
+      return stored;
     } catch {
+      localStorage.removeItem(STORAGE_KEY);
+      setAuthToken(null);
       return null;
     }
   });
@@ -30,8 +40,11 @@ export function AuthProvider({ children }) {
         return;
       }
 
+      // Preserve internship progress across sessions: only the auth token is
+      // cleared here. The cached simulation ("aiwse:simulation") is kept so a
+      // re-login can resume it, and the backend remains the source of truth.
       localStorage.removeItem(STORAGE_KEY);
-      localStorage.removeItem("aiwse:simulation");
+      setAuthToken(null);
       setAuth(null);
     });
 
@@ -41,6 +54,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const applySession = useCallback((data) => {
+    setAuthToken(data.access_token);
     const next = persist({
       token: data.access_token,
       studentId: data.student_id,
@@ -72,8 +86,12 @@ export function AuthProvider({ children }) {
   }, [applySession]);
 
   const logout = useCallback(() => {
+    // Keep "aiwse:simulation" so internship progress is preserved across
+    // logout and login. The simulation cache is namespaced per student on
+    // restore (see Onboarding/RequireSimulation), and the backend remains
+    // the source of truth.
     localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem("aiwse:simulation");
+    setAuthToken(null);
     setAuth(null);
   }, []);
 

@@ -15,7 +15,10 @@ means:
 This is the abstraction FEATURE 6 (AI Project Manager) and FEATURE 7
 (AI Teammates) will build on in the next phase.
 """
+import asyncio
+import hashlib
 import json
+import logging
 import random
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
@@ -26,6 +29,10 @@ from app.core.config import settings
 
 
 _MOCK_AI_SERVICE: Optional["MockAIService"] = None
+_GEMINI_AI_SERVICE: Optional["GeminiAIService"] = None
+_JSON_CACHE: Dict[str, Dict[str, Any]] = {}
+_JSON_CACHE_LIMIT = 64
+logger = logging.getLogger(__name__)
 
 
 class AIService(ABC):
@@ -237,8 +244,23 @@ class MockAIService(AIService):
         return "technology"
 
 
+def is_transient_ai_overload(exc: BaseException) -> bool:
+    """True when an exception is a transient Gemini overload (HTTP 503).
+
+    Used to decide between a quick retry / friendly error and letting any
+    other failure propagate exactly as before.
+    """
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 503
+
+
 class GeminiAIService(AIService):
     """Real Gemini-backed implementation, used once GEMINI_API_KEY is configured."""
+
+    # One quick retry smooths over transient model overload without noticeably
+    # delaying generation when Gemini is healthy.
+    OVERLOAD_MAX_ATTEMPTS = 2
+    OVERLOAD_RETRY_DELAY_SECONDS = 1.0
 
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key
@@ -247,39 +269,75 @@ class GeminiAIService(AIService):
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         )
 
-    async def _call(self, prompt: str, system_prompt: Optional[str]) -> str:
+    async def _call(self, prompt: str, system_prompt: Optional[str], *, json_mode: bool = False) -> str:
         contents: List[Dict[str, Any]] = []
         if system_prompt:
             contents.append({"role": "user", "parts": [{"text": f"[SYSTEM]\n{system_prompt}"}]})
         contents.append({"role": "user", "parts": [{"text": prompt}]})
+        generation: Dict[str, Any] = {"temperature": 0.2, "maxOutputTokens": 512 if json_mode else 256}
+        if json_mode:
+            generation["responseMimeType"] = "application/json"
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.base_url}?key={self.api_key}",
-                json={"contents": contents},
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            last_error: Optional[Exception] = None
+            for attempt in range(self.OVERLOAD_MAX_ATTEMPTS):
+                try:
+                    response = await client.post(
+                        self.base_url,
+                        headers={"x-goog-api-key": self.api_key},
+                        json={"contents": contents, "generationConfig": generation},
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                except Exception as exc:
+                    last_error = exc
+                    if not is_transient_ai_overload(exc) or attempt + 1 >= self.OVERLOAD_MAX_ATTEMPTS:
+                        raise
+                    logger.warning(
+                        "Gemini overloaded (503) for model %s; retrying once after %.1fs",
+                        self.model,
+                        self.OVERLOAD_RETRY_DELAY_SECONDS,
+                    )
+                    await asyncio.sleep(self.OVERLOAD_RETRY_DELAY_SECONDS)
+            assert last_error is not None
+            raise last_error
 
     async def generate_text(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        return await self._call(prompt, system_prompt)
+        return await self._call(prompt, system_prompt, json_mode=False)
 
     async def generate_json(
         self, prompt: str, system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         json_instruction = (
-            "Respond ONLY with valid JSON. No markdown fences, no preamble, no commentary."
+            "Respond ONLY with valid JSON. No markdown fences, no preamble, no commentary, no reasoning."
         )
         full_system = f"{system_prompt}\n{json_instruction}" if system_prompt else json_instruction
-        raw = await self._call(prompt, full_system)
+        cache_key = hashlib.sha256(
+            f"{self.model}|json|{full_system}|{prompt}".encode("utf-8")
+        ).hexdigest()
+        cached = _JSON_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+        try:
+            raw = await self._call(prompt, full_system, json_mode=True)
+        except Exception:
+            logger.warning("Gemini JSON request failed for model %s; caller should use the deterministic fallback", self.model)
+            raise
         cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        if len(_JSON_CACHE) >= _JSON_CACHE_LIMIT:
+            _JSON_CACHE.pop(next(iter(_JSON_CACHE)))
+        _JSON_CACHE[cache_key] = parsed
+        return dict(parsed)
 
 
 def get_ai_service() -> AIService:
     if settings.GEMINI_API_KEY:
-        return GeminiAIService(api_key=settings.GEMINI_API_KEY, model=settings.GEMINI_MODEL)
+        global _GEMINI_AI_SERVICE
+        if _GEMINI_AI_SERVICE is None or _GEMINI_AI_SERVICE.model != settings.GEMINI_MODEL:
+            _GEMINI_AI_SERVICE = GeminiAIService(api_key=settings.GEMINI_API_KEY, model=settings.GEMINI_MODEL)
+        return _GEMINI_AI_SERVICE
 
     global _MOCK_AI_SERVICE
     if _MOCK_AI_SERVICE is None:

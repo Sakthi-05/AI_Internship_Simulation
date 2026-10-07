@@ -294,6 +294,10 @@ class TestSubmitWithoutStarting:
             data={"metadata": '{"response": "Here is my code"}'},
         )
         assert resp.status_code == 400
+        task_after = client.get(f"/api/tasks/{task_id}", headers=auth_headers)
+        assert task_after.status_code == 200
+        assert task_after.json()["status"] == "todo"
+        assert task_after.json()["started_at"] is None
 
 
 # ============================================================

@@ -147,33 +147,95 @@ def build_task_context(db: Session, task: Task) -> Dict[str, Any]:
     }
 
 
+#: Metadata keys that count as real work evidence alongside attached files.
+#: Mirrors SubmissionService._has_submission_evidence so the reviewer sees
+#: exactly what the student actually provided (written response, pasted code,
+#: notes, links) — never an empty shell that invites invented analysis.
+_METADATA_EVIDENCE_KEYS = ("response", "code", "evidence", "notes", "url", "deliverable_url")
+
+#: Minimum extractable file text that counts as analyzable implementation.
+MIN_FILE_CONTENT_CHARS = 50
+#: Minimum written-evidence text that counts as analyzable on its own. Below
+#: this a note like "done" cannot verify any requirement, so the reviewer
+#: must ask for the missing detail instead of filling the gaps by invention.
+MIN_TEXT_EVIDENCE_CHARS = 200
+
+
+def metadata_evidence_text(metadata: Any) -> str:
+    """Render textual work evidence from submission metadata (no files needed)."""
+    parts = []
+    if isinstance(metadata, dict):
+        for key in _METADATA_EVIDENCE_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(f"{key.upper()}:\n{value.strip()[:2000]}")
+    return "\n\n".join(parts)
+
+
 def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str, Any]:
-    """Build complete context for AI review of a specific submission version."""
+    """Context for the current submission only: task, criteria, stack, and one prior review."""
     task = version.submission.task
-    
-    # Get project context
-    project_context = build_project_context(db, task.sprint.project)
-    
-    # Get task context with submission history
-    task_context = build_task_context(db, task)
-    
-    # Extract current submission content
+    project = task.sprint.project
     from app.services.content_extraction import extract_all_submission_files
     from app.services.file_storage import FileStorageService
+    from app.models.submission import AIReview
+
     storage_service = FileStorageService()
-    current_content = extract_all_submission_files(version.files, storage_service) if version.files else "No files submitted."
-    
-    # Merge all contexts
-    context = {**project_context, **task_context}
-    context.update({
+    file_content = ""
+    if version.files:
+        try:
+            file_content = extract_all_submission_files(version.files, storage_service) or ""
+        except Exception:
+            file_content = ""
+    meta_text = metadata_evidence_text(version.version_metadata)
+    file_chars = len(file_content.strip())
+    meta_chars = len(meta_text.strip())
+    attached_filenames = [
+        str(item.get("filename") or item.get("original_filename") or "unnamed file")
+        for item in (version.files or [])
+        if isinstance(item, dict)
+    ]
+    # Evidence tiers: "full" is analyzable; "thin" is a real submission too
+    # brief to verify (e.g. a one-line note with no code); "none" is empty.
+    # Anything below "full" gets deterministic guidance — never model analysis
+    # that would have to invent the missing substance.
+    if file_chars >= MIN_FILE_CONTENT_CHARS or meta_chars >= MIN_TEXT_EVIDENCE_CHARS:
+        evidence_level = "full"
+    elif version.files or meta_chars > 0:
+        evidence_level = "thin"
+    else:
+        evidence_level = "none"
+    combined = "\n\n".join(part for part in (file_content.strip(), meta_text) if part)
+    has_work_evidence = evidence_level in ("full", "thin")
+    current_content = combined if combined else "No work evidence submitted."
+    if len(current_content) > 3500:
+        current_content = current_content[:3500] + "\n[truncated]"
+
+    previous_review = ""
+    prior = db.execute(
+        select(AIReview)
+        .join(SubmissionVersion, SubmissionVersion.id == AIReview.version_id)
+        .where(
+            SubmissionVersion.submission_id == version.submission_id,
+            SubmissionVersion.id != version.id,
+        )
+        .order_by(AIReview.created_at.desc())
+    ).scalars().first()
+    if prior and prior.summary:
+        previous_review = prior.summary[:300]
+
+    return {
+        "task_title": task.title,
+        "task_description": (task.description or "")[:500],
+        "acceptance_criteria": list(task.acceptance_criteria or [])[:8],
+        "technology_stack": list(project.technology_stack or [])[:6],
+        "previous_review": previous_review,
+        "has_work_evidence": has_work_evidence,
+        "evidence_level": evidence_level,
+        "attached_filenames": attached_filenames,
         "current_submission": {
             "version_number": version.version_number,
-            "submitted_at": version.submitted_at.isoformat() if version.submitted_at else None,
-            "files": version.files,
-            "metadata": version.version_metadata,
             "content": current_content,
         },
-        "submission_content": current_content,  # For backward compatibility with prompt builder
-    })
-    
-    return context
+        "submission_content": current_content,
+    }

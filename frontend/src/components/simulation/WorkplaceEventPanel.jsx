@@ -1,25 +1,27 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import EventResponseModal from "./EventResponseModal";
 
-export default function WorkplaceEventPanel({ events, activeEvent, currentTask, onRespond, isResponding }) {
+export default function WorkplaceEventPanel({ events, activeEvent, currentTask, onRespond, isResponding, suppressModal = false }) {
   const [respondingToEvent, setRespondingToEvent] = useState(null);
+  useEffect(() => {
+    if (suppressModal) setRespondingToEvent(null);
+  }, [suppressModal]);
   if (!events || events.length === 0) {
     return (
-      <div className="card h-full flex flex-col">
-        <div className="p-4 border-b border-border">
-          <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint">
-            Workplace Events
+      <div className="card flex h-full flex-col overflow-hidden">
+        <div className="border-b border-white/[0.06] bg-white/[0.02] p-3.5">
+          <h3 className="font-display text-xs font-bold uppercase tracking-[0.14em] text-text-faint">
+            ⚡ Workplace Events
           </h3>
         </div>
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center text-text-muted p-4">
-            <svg className="w-12 h-12 mx-auto mb-3 text-text-faint" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14 10h4m0 0v4m0-4h-4" />
-            </svg>
-            <p className="font-medium">No events yet</p>
-            <p className="text-sm mt-1">Workplace events will appear here as you work on tasks.</p>
+        <div className="flex flex-1 items-center justify-center">
+          <div className="p-4 text-center text-text-muted">
+            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-gradient-to-br from-brand-500/15 to-accent-cyan/10 text-xl shadow-[0_0_30px_-10px_rgba(124,108,246,0.6)]">
+              ⚡
+            </div>
+            <p className="text-sm font-semibold text-text">All quiet on the floor</p>
+            <p className="mt-1 text-xs text-text-faint">Workplace events will appear here as you work on tasks.</p>
           </div>
         </div>
       </div>
@@ -71,14 +73,14 @@ export default function WorkplaceEventPanel({ events, activeEvent, currentTask, 
   };
 
   return (
-    <div className="card h-full flex flex-col">
+    <div className="card flex h-full flex-col overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-border flex items-center justify-between">
-        <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint">
-          Workplace Events
+      <div className="flex items-center justify-between border-b border-white/[0.06] bg-white/[0.02] p-3.5">
+        <h3 className="font-display text-xs font-bold uppercase tracking-[0.14em] text-text-faint">
+          ⚡ Workplace Events
         </h3>
-        <span className="px-2 py-0.5 rounded text-xs font-mono bg-surface-2 text-text-muted">
-          {events.length}
+        <span className="chip chip-glow font-mono text-[10px]!">
+          {events.length} live
         </span>
       </div>
 
@@ -87,11 +89,14 @@ export default function WorkplaceEventPanel({ events, activeEvent, currentTask, 
         {events.map((event) => (
           <motion.div
             key={event.id}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className={`p-3 rounded-lg border transition-all ${
-              event.id === activeEvent?.id ? "ring-2 ring-status-todo" : ""
-            } ${eventTypeColors[event.event_type] || "border-border"}`}
+            initial={{ opacity: 0, y: 12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ type: "spring", stiffness: 300, damping: 28 }}
+            className={`rounded-xl border p-3 backdrop-blur-sm transition-all duration-200 ${
+              event.id === activeEvent?.id
+                ? "border-brand-400/60 shadow-[0_0_32px_-10px_rgba(124,108,246,0.9)]"
+                : "hover:-translate-y-px"
+            } ${eventTypeColors[event.event_type] || "border-white/[0.07] bg-white/[0.03]"}`}
           >
             <div className="flex items-start gap-3">
               <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
@@ -160,7 +165,7 @@ export default function WorkplaceEventPanel({ events, activeEvent, currentTask, 
       </div>
 
       {/* Event Response Modal */}
-      {respondingToEvent && respondingToEvent.action_required && respondingToEvent.status === "pending" && (
+      {!suppressModal && respondingToEvent && respondingToEvent.action_required && respondingToEvent.status === "pending" && (
         <EventResponseModal
           event={respondingToEvent}
           onClose={() => setRespondingToEvent(null)}

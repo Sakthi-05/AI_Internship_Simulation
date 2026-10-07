@@ -26,30 +26,36 @@ export default function TaskDetailDrawer({ task, allTasks, onClose, onUpdateStat
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-0 z-40 bg-black/40"
+        className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         onClick={onClose}
       />
       <motion.div
-        className="fixed right-0 top-0 z-50 h-full w-full max-w-md overflow-y-auto border-l border-border bg-surface p-5"
+        className="fixed right-0 top-0 z-50 h-full w-full max-w-md overflow-y-auto border-l border-white/10 bg-surface/95 p-5 shadow-[-40px_0_100px_-20px_rgba(0,0,0,0.9)] backdrop-blur-2xl"
         initial={{ x: "100%" }}
         animate={{ x: 0 }}
         exit={{ x: "100%" }}
-        transition={{ type: "spring", damping: 28, stiffness: 300 }}
+        transition={{ type: "spring", damping: 30, stiffness: 300 }}
       >
-        <div className="flex items-start justify-between gap-3">
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-brand-500/10 to-transparent" />
+        <div className="relative flex items-start justify-between gap-3">
           <div>
             <span
-              className="rounded px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide"
-              style={{ color: STATUS_META[task.status].color }}
+              className="rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide"
+              style={{
+                color: STATUS_META[task.status].color,
+                borderColor: `color-mix(in srgb, ${STATUS_META[task.status].color} 40%, transparent)`,
+                backgroundColor: `color-mix(in srgb, ${STATUS_META[task.status].color} 12%, transparent)`,
+                boxShadow: `0 0 16px -6px ${STATUS_META[task.status].color}`,
+              }}
             >
-              {STATUS_META[task.status].label}
+              ● {STATUS_META[task.status].label}
             </span>
-            <h2 className="mt-2 font-display text-lg font-semibold leading-snug">{task.title}</h2>
+            <h2 className="mt-2.5 font-display text-lg font-bold leading-snug">{task.title}</h2>
           </div>
-          <button onClick={onClose} className="btn-ghost">Close</button>
+          <button onClick={onClose} className="btn-ghost shrink-0">✕ Close</button>
         </div>
 
         <p className="mt-4 text-sm leading-relaxed text-text-muted">{task.description}</p>

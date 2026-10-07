@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import { DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { useSimulation } from "../context/SimulationContext";
 import { useBoard, useUpdateTaskStatus } from "../hooks/useApi";
@@ -63,10 +64,24 @@ export default function Board() {
 
   return (
     <div className="flex h-full flex-col">
-      {banner && (
-        <div className="border-b border-status-blocked/40 bg-status-blocked/10 px-4 py-2 text-sm text-status-blocked">
-          {banner}
+      <div className="flex items-center justify-between gap-3 px-5 pb-1 pt-4">
+        <div>
+          <p className="eyebrow">Sprint command deck</p>
+          <h1 className="mt-0.5 font-display text-xl font-bold">Task <span className="gradient-text">Board</span></h1>
         </div>
+        <span className="chip font-mono text-[11px]!">
+          <span className="h-1.5 w-1.5 rounded-full bg-status-completed shadow-[0_0_8px_rgba(62,214,149,0.9)] animate-pulse-soft" />
+          {allTasks.length} tasks in play
+        </span>
+      </div>
+      {banner && (
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mx-4 mt-2 flex items-center gap-2 rounded-xl border border-status-blocked/40 bg-status-blocked/10 px-4 py-2.5 text-sm text-status-blocked shadow-[0_0_24px_-8px_rgba(239,91,91,0.6)]"
+        >
+          <span>⚠</span>{banner}
+        </motion.div>
       )}
       <div className="flex-1 overflow-x-auto p-4">
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
@@ -106,10 +121,17 @@ export default function Board() {
 function ErrorState({ message }) {
   return (
     <div className="flex h-full items-center justify-center p-6">
-      <div className="card max-w-sm text-center">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="card max-w-sm p-8 text-center"
+      >
+        <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-status-blocked/15 text-xl shadow-[0_0_28px_-6px_rgba(239,91,91,0.7)]">
+          ⚠
+        </div>
         <p className="font-display text-sm font-semibold text-status-blocked">Couldn't load the board</p>
         <p className="mt-2 text-sm text-text-muted">{message}</p>
-      </div>
+      </motion.div>
     </div>
   );
 }

@@ -55,7 +55,11 @@ def _company_type(domain: str | None) -> str:
 def build_simulation_recommendation(profile) -> Dict[str, Any]:
     from app.services.intelligence_service import COMPETENCIES, DEFAULT_COMPETENCIES
 
-    scores = profile.baseline_competencies or profile.current_competencies or dict(DEFAULT_COMPETENCIES)
+    current = profile.current_competencies or {}
+    baseline = profile.baseline_competencies or {}
+    # Later simulations follow the latest demonstrated scores. The baseline
+    # remains the source until those scores exist.
+    scores = current if any(key in current for key in COMPETENCIES) else baseline or dict(DEFAULT_COMPETENCIES)
     numeric = [float(scores.get(key, 60)) for key in COMPETENCIES]
     average = statistics.mean(numeric) if numeric else 60.0
     role = profile.role or "Backend Developer"

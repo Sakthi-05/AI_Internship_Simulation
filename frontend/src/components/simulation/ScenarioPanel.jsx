@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 export default function ScenarioPanel({ scenario, simulation, progress, company }) {
   if (!scenario) {
     return (
-      <div className="card h-full p-4 flex flex-col">
+      <div className="card p-4 flex flex-col">
         <div className="text-center text-text-muted py-8">
           <p>No active scenario</p>
         </div>
@@ -17,36 +17,36 @@ export default function ScenarioPanel({ scenario, simulation, progress, company 
   const scenarioProgressPct = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   return (
-    <div className="card h-full flex flex-col overflow-hidden">
+    <div className="card flex flex-col overflow-hidden">
       {/* Scenario Header */}
-      <div className="p-4 border-b border-border">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="px-2 py-0.5 rounded text-xs font-mono uppercase tracking-wide bg-status-todo/10 text-status-todo">
-                Scenario {scenario.sequence}
+      <div className="relative border-b border-white/[0.06] bg-white/[0.02] p-4">
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-brand-500/10 to-transparent" />
+        <div className="relative flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="mb-2 flex items-center gap-1.5">
+              <span className="chip chip-glow font-mono text-[10px]!">
+                ◈ Scenario {scenario.sequence}
               </span>
-              <span className="px-2 py-0.5 rounded text-xs bg-surface-2 text-text-muted">
+              <span className="chip text-[10px]! capitalize">
                 {scenario.difficulty}
               </span>
             </div>
-            <h2 className="font-display text-lg font-semibold">{scenario.title}</h2>
-            <p className="mt-1 text-sm text-text-muted">{scenario.description}</p>
+            <h2 className="font-display text-lg font-bold leading-snug">{scenario.title}</h2>
+            <p className="mt-1 text-sm leading-relaxed text-text-muted">{scenario.description}</p>
           </div>
-          <div className="text-right shrink-0">
-            <p className="text-xs text-text-faint">Progress</p>
-            <p className="font-mono text-xl font-semibold">{scenarioProgressPct}%</p>
-            <p className="text-xs text-text-muted">{completedTasks} / {totalTasks} tasks</p>
+          <div className="shrink-0 rounded-xl border border-white/[0.07] bg-ink/50 px-3 py-2 text-center">
+            <p className="gradient-text font-mono text-xl font-bold">{scenarioProgressPct}%</p>
+            <p className="font-mono text-[10px] text-text-muted">{completedTasks}/{totalTasks}</p>
           </div>
         </div>
 
         {/* Progress bar */}
-        <div className="mt-3 h-2 bg-surface-2 rounded-full overflow-hidden">
+        <div className="progress-track relative mt-3 h-2">
           <motion.div
             initial={{ width: 0 }}
             animate={{ width: `${scenarioProgressPct}%` }}
-            className="h-full bg-status-todo rounded-full"
-            transition={{ duration: 0.5 }}
+            className="progress-fill"
+            transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
           />
         </div>
       </div>
@@ -135,12 +135,13 @@ function ScenarioTaskItem({ task, isCurrent, locked }) {
     <motion.li
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
-      className={`p-3 rounded-lg border transition-all ${
+      whileHover={locked ? undefined : { x: 3 }}
+      className={`rounded-xl border p-3 transition-all duration-200 ${
         locked
-          ? "border-border/50 bg-surface-2/30 opacity-60"
+          ? "border-white/[0.04] bg-white/[0.01] opacity-55"
           : isCurrent
-            ? "border-status-todo bg-status-todo/5"
-            : "border-border"
+            ? "border-brand-400/50 bg-gradient-to-r from-brand-500/[0.14] to-accent-cyan/[0.06] shadow-[0_0_28px_-10px_rgba(124,108,246,0.8)]"
+            : "border-white/[0.06] bg-white/[0.02] hover:border-brand-400/25"
       }`}
     >
       <div className="flex items-start gap-2">

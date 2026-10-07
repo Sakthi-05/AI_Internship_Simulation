@@ -13,7 +13,9 @@ from app.models.enums import TaskStatus
 from app.models.project import Project
 from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
+from app.models.simulation import Scenario, ScenarioTask, Simulation
 from app.models.task import Task, TaskDependency
+from app.models.task_path import SimulationTaskPath
 from app.schemas.task import TaskRead, TaskStatusUpdate
 from app.services.engines import workflow_engine
 from app.services.engines.task_state_machine import (
@@ -98,7 +100,13 @@ def get_task(
     from app.services.simulation.task_access_service import require_current_task_for_active_project
     # Completed tasks remain viewable; future path tasks do not.
     if task.status != TaskStatus.COMPLETED:
-        require_current_task_for_active_project(db, user.student_id, sprint.project_id, task.id)
+        require_current_task_for_active_project(
+            db,
+            user.student_id,
+            sprint.project_id,
+            task.id,
+            allow_resubmission=task.status == TaskStatus.CHANGES_REQUESTED,
+        )
     return _to_task_read(task, db)
 
 
@@ -127,22 +135,27 @@ def get_kanban_board(
     )
     tasks = db.execute(stmt).scalars().all()
 
-    # Build lock map from task path if simulation_id provided
+    # A simulation can use a subset of project tasks. Keep its board aligned
+    # with the task path used by the workspace.
     lock_map: dict[uuid.UUID, bool] = {}
     if simulation_id is not None:
-        from app.models.simulation import Simulation
-        from app.models.task_path import SimulationTaskPath
-
         simulation = db.get(Simulation, simulation_id)
-        if simulation:
-            current_task_id = simulation.current_task_id
-            for task in tasks:
-                if task.status == TaskStatus.COMPLETED:
-                    lock_map[task.id] = False
-                elif task.id == current_task_id:
-                    lock_map[task.id] = False
-                else:
-                    lock_map[task.id] = True
+        if simulation is None or simulation.project_id != project_id or simulation.student_id != user.student_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found for this project")
+        path_ids = db.execute(
+            select(SimulationTaskPath.task_id).where(SimulationTaskPath.simulation_id == simulation.id)
+        ).scalars().all()
+        if not path_ids:
+            path_ids = db.execute(
+                select(ScenarioTask.task_id)
+                .join(Scenario, Scenario.id == ScenarioTask.scenario_id)
+                .where(Scenario.simulation_id == simulation.id)
+            ).scalars().all()
+        allowed_ids = set(path_ids)
+        tasks = [task for task in tasks if task.id in allowed_ids]
+        current_task_id = simulation.current_task_id
+        for task in tasks:
+            lock_map[task.id] = task.status != TaskStatus.COMPLETED and task.id != current_task_id
 
     board: Dict[str, List[dict]] = {s.value: [] for s in TaskStatus}
     for task in tasks:
@@ -172,7 +185,13 @@ async def update_task_status(
     # This ensures dependency errors (409) take precedence over transition errors (400)
     if payload.status == TaskStatus.IN_PROGRESS:
         from app.services.simulation.task_access_service import require_current_task_for_active_project
-        require_current_task_for_active_project(db, user.student_id, sprint.project_id, task.id)
+        require_current_task_for_active_project(
+            db,
+            user.student_id,
+            sprint.project_id,
+            task.id,
+            allow_resubmission=task.status == TaskStatus.CHANGES_REQUESTED,
+        )
         _check_dependencies(db, task)
 
     # Validate state machine transition
@@ -197,6 +216,11 @@ async def update_task_status(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot submit task from '{task.status.value}'. Must be IN_PROGRESS.",
             )
+        if task.started_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Task must be started before it can be submitted.",
+            )
         # Require deliverable URL for submission
         if not payload.deliverable_url and not task.deliverable_url:
             raise HTTPException(
@@ -213,8 +237,10 @@ async def update_task_status(
             )
 
     if payload.status == TaskStatus.UNDER_REVIEW:
-        # Can move to UNDER_REVIEW from SUBMITTED (manual review assignment)
-        if task.status != TaskStatus.SUBMITTED:
+        # Can move to UNDER_REVIEW from SUBMITTED (manual review assignment).
+        # UNDER_REVIEW itself is accepted too: submissions now enter review
+        # directly, so re-asserting the state must stay idempotent.
+        if task.status not in (TaskStatus.SUBMITTED, TaskStatus.UNDER_REVIEW):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot move to UNDER_REVIEW from '{task.status.value}'. Must be SUBMITTED.",

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, status, UploadFile
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
 from app.models.company import Company
-from app.models.enums import SimulationStatus, ScenarioStatus, TaskStatus, WorkflowEventStatus, WorkflowEventType
+from app.models.enums import SimulationStatus, ScenarioStatus, TaskStatus, SubmissionStatus, WorkflowEventStatus, WorkflowEventType
 from app.models.project import Project
 from app.models.sprint import Sprint
 from app.models.simulation import Simulation, Scenario, ScenarioTask, WorkflowEvent
@@ -26,6 +26,7 @@ from app.services.engines.simulation_task_state_machine import (
     get_project_status_for_simulation_state,
 )
 from app.services.submission.submission_service import SubmissionService
+from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.file_storage import FileValidationError
 from app.services.activity_log_service import log_activity
 from app.services.simulation.interaction_history_service import (
@@ -44,6 +45,45 @@ class CreateSimulationRequest(BaseModel):
 
 class StartSimulationRequest(BaseModel):
     task_ids: Optional[List[uuid.UUID]] = None
+
+
+@router.get("/mine")
+def list_my_simulations(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List the authenticated student's internship simulations (newest first).
+
+    The frontend uses this after login to decide between
+    "Start Internship Simulation" (no existing progress) and
+    "Resume Internship Simulation" (existing progress to restore),
+    so progress survives logout/login and browser-storage loss.
+    """
+    rows = db.execute(
+        select(Simulation)
+        .where(Simulation.student_id == user.student_id)
+        .order_by(Simulation.created_at.desc())
+    ).scalars().all()
+    return [
+        {
+            "simulation_id": str(sim.id),
+            "company_id": str(sim.company_id),
+            "project_id": str(sim.project_id),
+            "title": sim.title,
+            "description": sim.description,
+            "role": sim.role,
+            "difficulty": sim.difficulty.value,
+            "duration_weeks": sim.duration_weeks,
+            "status": sim.status.value,
+            "progress": sim.progress,
+            "current_task_id": str(sim.current_task_id) if sim.current_task_id else None,
+            "current_scenario_id": str(sim.current_scenario_id) if sim.current_scenario_id else None,
+            "started_at": sim.started_at.isoformat() if sim.started_at else None,
+            "completed_at": sim.completed_at.isoformat() if sim.completed_at else None,
+            "created_at": sim.created_at.isoformat() if sim.created_at else None,
+        }
+        for sim in rows
+    ]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -332,7 +372,21 @@ async def start_simulation(
     
     db.commit()
     db.refresh(simulation)
-    
+
+    # The manager greets the intern as the simulation begins. Gated by the
+    # same pacing as everything else: first start gets the greeting, later
+    # restarts fall back to task instructions instead of repeating it.
+    try:
+        from app.services import proactive_chat_service as proactive
+        msg = proactive.maybe_send_proactive_message(
+            db, simulation.company_id, channel="manager", trigger="simulation_started"
+        )
+        if msg is not None:
+            await proactive.broadcast_message(simulation.company_id, msg, channel="manager")
+    except Exception:
+        import logging as _logging
+        _logging.getLogger("aiwse.simulation").warning("Simulation-start chat greeting failed", exc_info=True)
+
     # Return full simulation state
     return get_simulation(simulation_id, db, user)
 
@@ -685,6 +739,7 @@ async def get_current_task(
     simulation_id: uuid.UUID,
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
+    ai_service: AIService = Depends(get_ai_service),
 ):
     """Get the current active task with full details."""
     simulation = _get_owned_simulation(simulation_id, db, user)
@@ -764,6 +819,51 @@ async def get_current_task(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="No active task for this simulation"
                 )
+
+    # Recover legacy submissions committed UNDER_REVIEW before the review
+    # request failed. Lock the latest version so a simultaneous frontend
+    # review request waits and then reuses the persisted result.
+    if task.status == TaskStatus.UNDER_REVIEW:
+        from app.models.submission import AIReview
+        from app.services.ai.review_service import ReviewService
+        pending_version = db.execute(
+            select(SubmissionVersion)
+            .join(Submission, Submission.id == SubmissionVersion.submission_id)
+            .where(Submission.task_id == task.id)
+            .order_by(SubmissionVersion.version_number.desc())
+            .limit(1)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalars().first()
+        is_stale_pending_review = bool(
+            pending_version
+            and pending_version.submitted_at
+            and pending_version.submitted_at < datetime.now(timezone.utc) - timedelta(seconds=10)
+        )
+        if is_stale_pending_review and pending_version.status in (
+            SubmissionStatus.SUBMITTED,
+            SubmissionStatus.UNDER_REVIEW,
+        ):
+            existing_review = db.execute(
+                select(AIReview.id).where(AIReview.version_id == pending_version.id)
+            ).first()
+            if existing_review is None:
+                review_service = ReviewService(ai_service)
+                await review_service.review_submission_version(db, pending_version)
+                if pending_version.status in (
+                    SubmissionStatus.APPROVED,
+                    SubmissionStatus.CHANGES_REQUESTED,
+                    SubmissionStatus.REJECTED,
+                ):
+                    await review_service.review_by_manager(db, pending_version)
+                db.refresh(simulation)
+                if simulation.current_task_id:
+                    task = db.get(Task, simulation.current_task_id)
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="No active task for this simulation",
+                    )
     
     # Get current scenario
     current_scenario = None
@@ -805,7 +905,13 @@ async def get_current_task(
         )
         .order_by(WorkflowEvent.occurred_at.desc())
     ).scalar_one_or_none()
-    
+
+    # Latest AI review feedback for resubmission guidance (None until a
+    # submitted version has actually been reviewed). Read-only; the
+    # frontend renders it in the Changes Requested section.
+    from app.services.ai.review_service import get_task_review_feedback
+    review_feedback = get_task_review_feedback(db, task)
+
     return {
         "task_id": str(task.id),
         "simulation_id": str(simulation.id),
@@ -825,6 +931,7 @@ async def get_current_task(
         "estimated_hours": task.estimated_hours,
         "remaining_time": remaining_time,
         "deadline_missed": deadline_missed,
+        "review_feedback": review_feedback,
         "active_workplace_event": {
             "id": str(active_event.id),
             "event_type": active_event.event_type.value,
@@ -840,10 +947,18 @@ async def get_current_task(
     }
 
 
-def _check_task_unlocked(db: Session, simulation: Simulation, task_id: uuid.UUID) -> None:
+def _check_task_unlocked(
+    db: Session,
+    simulation: Simulation,
+    task_id: uuid.UUID,
+    *,
+    allow_resubmission: bool = False,
+) -> None:
     """Enforce current-task-only access. Raises 403 if task is locked."""
     from app.services.simulation.task_access_service import require_current_task_access
-    require_current_task_access(db, simulation, task_id)
+    require_current_task_access(
+        db, simulation, task_id, allow_resubmission=allow_resubmission
+    )
 
 
 @router.post("/{simulation_id}/tasks/{task_id}/start", status_code=status.HTTP_200_OK)
@@ -856,7 +971,7 @@ async def start_simulation_task(
     """Start a simulation task: change state to STARTED, record started_at, calculate deadline."""
     simulation = _get_owned_simulation(simulation_id, db, user)
     
-    _check_task_unlocked(db, simulation, task_id)
+    _check_task_unlocked(db, simulation, task_id, allow_resubmission=True)
     
     task = db.get(Task, task_id)
     if not task:
@@ -988,7 +1103,20 @@ async def start_simulation_task(
     
     from app.services.engines import check_and_trigger_workflow_events
     await check_and_trigger_workflow_events(db, simulation, task, current_scenario)
-    
+
+    # A teammate reacts to the kickoff so the workplace feels alive. Forced
+    # (a user action deserves one reaction) but never breaks the start flow.
+    try:
+        from app.services import proactive_chat_service as proactive
+        msg = proactive.maybe_send_proactive_message(
+            db, simulation.company_id, channel="team_member", trigger="task_started"
+        )
+        if msg is not None:
+            await proactive.broadcast_message(simulation.company_id, msg, channel="team")
+    except Exception:
+        import logging as _logging
+        _logging.getLogger("aiwse.simulation").warning("Task-start chat reaction failed", exc_info=True)
+
     # Return updated task with time tracking info
     remaining_time = None
     if task.started_at and task.deadline:
@@ -1032,7 +1160,7 @@ async def submit_simulation_task(
     """Submit a simulation task for evaluation - captures evidence for Member 3."""
     simulation = _get_owned_simulation(simulation_id, db, user)
     
-    _check_task_unlocked(db, simulation, task_id)
+    _check_task_unlocked(db, simulation, task_id, allow_resubmission=True)
     
     task = db.get(Task, task_id)
     if not task:
@@ -1040,7 +1168,7 @@ async def submit_simulation_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found"
         )
-    
+
     if task.status in {
         TaskStatus.SUBMITTED,
         TaskStatus.UNDER_REVIEW,
@@ -1051,6 +1179,23 @@ async def submit_simulation_task(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Task is locked. Only the current unlocked task can be accessed.",
         )
+
+    # Resubmission after review: restart rework through the same legal
+    # CHANGES_REQUESTED -> IN_PROGRESS transition as the start endpoint, so
+    # the current task can be revised and resubmitted with no new task and
+    # no workflow change. Everything below runs the normal submit flow.
+    if task.status == TaskStatus.CHANGES_REQUESTED:
+        from app.services.engines.task_state_machine import InvalidTransitionError, validate_transition
+        try:
+            validate_transition(task.status, TaskStatus.IN_PROGRESS)
+        except InvalidTransitionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        task.status = TaskStatus.IN_PROGRESS
+        db.add(task)
+        db.flush()
 
     # Validate task state - must be IN_PROGRESS to submit
     if task.status != TaskStatus.IN_PROGRESS:
@@ -1119,10 +1264,24 @@ async def submit_simulation_task(
         task.deliverable_url = f"submission://{result['submission_id']}"
     db.add(task)
 
-    # Submission moves the task to SUBMITTED via the SubmissionService above.
-    # The task stays there for evaluation/review; completion (and progression
-    # to the next unlocked task) happens only through the complete endpoint
-    # after MANAGER_APPROVAL, and rework keeps this task as the current one.
+    # The submission is now under evaluation: IN_PROGRESS -> SUBMITTED (done
+    # by SubmissionService above) -> UNDER_REVIEW here. The task is NOT
+    # completed, current_task_id does NOT move, and the next task stays
+    # locked — completion and progression happen only through the complete
+    # endpoint after an approved review. The version/submission rows stay
+    # SUBMITTED, which is the state the review endpoint expects.
+    from app.services.engines.task_state_machine import InvalidTransitionError as _SubmitTransitionError
+    from app.services.engines.task_state_machine import validate_transition as _validate_submit_transition
+    try:
+        _validate_submit_transition(task.status, TaskStatus.UNDER_REVIEW)
+    except _SubmitTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    task.status = TaskStatus.UNDER_REVIEW
+    db.add(task)
+
     path_entry = db.execute(
         select(SimulationTaskPath).where(
             SimulationTaskPath.simulation_id == simulation_id,
@@ -1130,7 +1289,7 @@ async def submit_simulation_task(
         )
     ).scalar_one_or_none()
     if path_entry:
-        path_entry.status = TaskStatus.SUBMITTED
+        path_entry.status = TaskStatus.UNDER_REVIEW
         db.add(path_entry)
 
     simulation.progress = _calculate_simulation_progress(db, simulation)
@@ -1235,7 +1394,20 @@ async def submit_simulation_task(
     db.commit()
     db.refresh(task)
     db.refresh(simulation)
-    
+
+    # The manager acknowledges the submission in chat — visible progress that
+    # persists for the student's next visit.
+    try:
+        from app.services import proactive_chat_service as proactive
+        msg = proactive.maybe_send_proactive_message(
+            db, simulation.company_id, channel="manager", trigger="task_submitted"
+        )
+        if msg is not None:
+            await proactive.broadcast_message(simulation.company_id, msg, channel="manager")
+    except Exception:
+        import logging as _logging
+        _logging.getLogger("aiwse.simulation").warning("Task-submit chat reaction failed", exc_info=True)
+
     # Build evaluation-ready evidence for Member 3
     current_scenario = None
     if simulation.current_scenario_id:
@@ -1439,44 +1611,26 @@ async def complete_simulation_task(
             "message": "Task was already completed",
         }
     
-    if task.status not in [TaskStatus.SUBMITTED, TaskStatus.UNDER_REVIEW, TaskStatus.MANAGER_APPROVAL]:
+    if task.status != TaskStatus.MANAGER_APPROVAL:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot evaluate task from '{task.status.value}'. Task must be SUBMITTED."
+            detail=f"Cannot complete task from '{task.status.value}'. Manager approval is required."
+        )
+
+    if not approved:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A task cannot be completed without manager approval.",
         )
 
     from app.services.engines.task_state_machine import validate_transition
-    
-    # Fast-forward through review states to respect state machine rules
+
     previous_status = task.status
-    if task.status == TaskStatus.SUBMITTED:
-        task.status = TaskStatus.UNDER_REVIEW
-        
-    if approved:
-        if task.status == TaskStatus.UNDER_REVIEW:
-            task.status = TaskStatus.MANAGER_APPROVAL
-        validate_transition(task.status, TaskStatus.COMPLETED)
-        task.status = TaskStatus.COMPLETED
-        task.completed_at = datetime.now(timezone.utc)
-        
-        # Mark task path entry as completed
-        path_entry = db.execute(
-            select(SimulationTaskPath).where(
-                SimulationTaskPath.simulation_id == simulation_id,
-                SimulationTaskPath.task_id == task_id,
-            )
-        ).scalar_one_or_none()
-        if path_entry:
-            path_entry.status = TaskStatus.COMPLETED
-            db.add(path_entry)
-            
-    else:
-        # Rework required
-        validate_transition(task.status, TaskStatus.CHANGES_REQUESTED)
-        task.status = TaskStatus.CHANGES_REQUESTED
-        # Note: Do not complete the path entry on rework
-        
-    db.add(task)
+    validate_transition(task.status, TaskStatus.COMPLETED)
+    task.status = TaskStatus.COMPLETED
+    task.completed_at = datetime.now(timezone.utc)
+
+    # Mark task path entry as completed only after manager approval.
     path_entry = db.execute(
         select(SimulationTaskPath).where(
             SimulationTaskPath.simulation_id == simulation_id,
@@ -1487,7 +1641,8 @@ async def complete_simulation_task(
         path_entry.status = TaskStatus.COMPLETED
         path_entry.completed_at = task.completed_at
         db.add(path_entry)
-    
+    db.add(task)
+
     # Update simulation progress
     simulation.progress = _calculate_simulation_progress(db, simulation)
     db.add(simulation)
@@ -1503,9 +1658,9 @@ async def complete_simulation_task(
         simulation_id=str(simulation.id),
         task_id=str(task.id),
         previous_status=previous_status.value,
-        new_status=TaskStatus.COMPLETED.value,
+        new_status=task.status.value,
     )
-    evaluation_decision = "completed" if approved else "rework"
+    evaluation_decision = "completed"
     record_interaction(
         db,
         simulation,
@@ -1521,7 +1676,8 @@ async def complete_simulation_task(
         },
     )
     
-    # Trigger task completion event
+    next_task = None
+    # Completion events and progression belong only to manager-approved work.
     from app.services.engines.events_engine import trigger_event
     from app.models.enums import EventType
     project = db.get(Project, simulation.project_id)
@@ -1533,8 +1689,7 @@ async def complete_simulation_task(
             f"Task '{task.title}' completed",
             {"task_id": str(task.id), "task_title": task.title},
         )
-    
-    # Progress to next task/scenario
+
     from app.services.simulation.progression_service import progress_to_next_task
     next_task = await progress_to_next_task(db, simulation, task, user.student_id)
     if simulation.status == SimulationStatus.COMPLETED:
@@ -1550,7 +1705,22 @@ async def complete_simulation_task(
     
     db.commit()
     db.refresh(simulation)
-    
+
+    # The manager reacts to the verdict in chat (praise or rework steer).
+    try:
+        from app.services import proactive_chat_service as proactive
+        msg = proactive.maybe_send_proactive_message(
+            db,
+            simulation.company_id,
+            channel="manager",
+            trigger="task_completed" if approved else "task_rework",
+        )
+        if msg is not None:
+            await proactive.broadcast_message(simulation.company_id, msg, channel="manager")
+    except Exception:
+        import logging as _logging
+        _logging.getLogger("aiwse.simulation").warning("Task-complete chat reaction failed", exc_info=True)
+
     # Check if simulation is complete
     if simulation.status == SimulationStatus.COMPLETED:
         return {

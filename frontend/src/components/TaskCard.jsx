@@ -23,17 +23,19 @@ export default function TaskCard({ task, onOpen }) {
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
+      initial={{ opacity: 0, y: 8, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      whileHover={isLocked ? undefined : { y: -2 }}
+      transition={{ type: "spring", stiffness: 400, damping: 28 }}
       ref={draggable.setNodeRef}
       style={style}
       {...(isLocked ? {} : { ...draggable.listeners, ...draggable.attributes })}
       onClick={() => onOpen(task)}
-      className={`select-none rounded-md border bg-surface-2 p-3 text-sm shadow-sm transition-shadow ${
+      className={`group select-none rounded-xl border bg-gradient-to-b from-surface-2 to-surface p-3 text-sm shadow-[0_10px_28px_-16px_rgba(0,0,0,0.9)] transition-all duration-200 ${
         isLocked
-          ? "border-border/40 opacity-50 cursor-not-allowed"
-          : "border-border cursor-grab hover:border-status-todo/60 active:cursor-grabbing"
-      } ${draggable.isDragging ? "opacity-40" : ""}`}
+          ? "cursor-not-allowed border-white/[0.04] opacity-45"
+          : "cursor-grab border-white/[0.07] hover:border-brand-400/50 hover:shadow-[0_14px_36px_-14px_rgba(0,0,0,0.9),0_0_24px_-10px_rgba(124,108,246,0.6)] active:cursor-grabbing"
+      } ${draggable.isDragging ? "rotate-2 scale-105 opacity-70 shadow-[0_20px_50px_-12px_rgba(124,108,246,0.7)]" : ""} ${overdue ? "border-status-blocked/40" : ""}`}
     >
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="text-[10px] text-text-faint font-mono">#{task.sequence}</span>
@@ -55,12 +57,12 @@ export default function TaskCard({ task, onOpen }) {
           </span>
         )}
       </div>
-      <p className={`font-medium leading-snug ${isLocked ? "text-text-muted" : "text-text"}`}>{task.title}</p>
-      <div className="mt-2 flex items-center justify-between text-[11px] text-text-faint font-mono">
-        <span>{task.estimated_hours}h est.</span>
+      <p className={`font-medium leading-snug transition-colors ${isLocked ? "text-text-muted" : "text-text group-hover:text-white"}`}>{task.title}</p>
+      <div className="mt-2 flex items-center justify-between font-mono text-[11px] text-text-faint">
+        <span className="rounded bg-white/[0.04] px-1.5 py-0.5">{task.estimated_hours}h est.</span>
         {task.deadline && (
-          <span className={overdue ? "text-status-blocked" : ""}>
-            {new Date(task.deadline).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+          <span className={overdue ? "animate-pulse-soft rounded bg-status-blocked/15 px-1.5 py-0.5 font-bold text-status-blocked" : ""}>
+            {overdue ? "⚠ " : ""}{new Date(task.deadline).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
           </span>
         )}
       </div>

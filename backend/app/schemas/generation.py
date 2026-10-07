@@ -23,8 +23,11 @@ class GenerationResponse(BaseModel):
     company_id: uuid.UUID
     project_id: uuid.UUID
     simulation_id: uuid.UUID
+    title: str
+    description: str
     sprint_ids: List[uuid.UUID]
     task_count: int
+    duration_weeks: int
     difficulty: DifficultyLevel
     role: str
     company_type: CompanyType

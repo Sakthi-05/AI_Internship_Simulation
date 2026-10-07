@@ -102,11 +102,17 @@ async def start_task(
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     
-    if not can_start_task(task.status):
+    is_rework = task.status == TaskStatus.CHANGES_REQUESTED
+    if not can_start_task(task.status) and not is_rework:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot start task from '{task.status.value}'. Must be in BACKLOG or TODO."
         )
+
+    # A Changes Requested task is still the student's active task. Restart it
+    # through the state machine so it can be edited and submitted again.
+    if is_rework:
+        task.status = TaskStatus.IN_PROGRESS
 
     # Update task
     from datetime import datetime, timezone
@@ -164,9 +170,27 @@ async def submit_task(
     if sprint.project_id != project.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Task does not belong to this project")
 
+    from app.services.simulation.task_access_service import require_current_task_for_active_project
+    require_current_task_for_active_project(
+        db, user.student_id, project.id, task.id, allow_resubmission=True
+    )
+
+    from app.models.enums import TaskStatus
+
+    # Rework can be submitted directly through the same endpoint. Convert it
+    # back to IN_PROGRESS first, preserving the normal submit transition.
+    if task.status == TaskStatus.CHANGES_REQUESTED:
+        from app.services.engines.task_state_machine import validate_transition
+        try:
+            validate_transition(task.status, TaskStatus.IN_PROGRESS)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        task.status = TaskStatus.IN_PROGRESS
+        db.add(task)
+        db.flush()
+
     # Validate transition
     from app.services.engines.task_state_machine import validate_transition
-    from app.models.enums import TaskStatus
     
     try:
         validate_transition(task.status, TaskStatus.SUBMITTED)
@@ -177,6 +201,11 @@ async def submit_task(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot submit task from '{task.status.value}'. Must be IN_PROGRESS."
+        )
+    if task.started_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Task must be started before it can be submitted.",
         )
 
     # Parse metadata

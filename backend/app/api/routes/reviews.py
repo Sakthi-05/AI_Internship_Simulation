@@ -13,7 +13,7 @@ from app.models.company import Company
 from app.models.enums import SubmissionStatus
 from app.models.project import Project
 from app.models.sprint import Sprint
-from app.models.submission import SubmissionVersion
+from app.models.submission import AIReview, SubmissionVersion
 from app.models.task import Task
 from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.ai.review_service import ReviewService
@@ -56,6 +56,10 @@ async def create_review(
 ):
     project = _get_owned_project(project_id, db, user)
     version = _get_owned_version(version_id, db, user)
+    # Serialize duplicate review requests with current-task recovery. If the
+    # request waited for an in-flight review, the completed review below is
+    # returned idempotently instead of leaving UNDER_REVIEW or running twice.
+    db.refresh(version, with_for_update=True)
 
     # Verify version belongs to this project
     task = db.get(Task, version.submission.task_id)
@@ -63,8 +67,14 @@ async def create_review(
     if sprint.project_id != project.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Version does not belong to this project")
 
-    # Only allow review of submitted versions
-    if version.status != SubmissionStatus.SUBMITTED:
+    existing_review = db.execute(
+        select(AIReview)
+        .where(AIReview.version_id == version.id)
+        .order_by(AIReview.created_at.desc())
+    ).scalars().first()
+    # Only allow a new review for submitted work. Previously reviewed versions
+    # may be retried as an idempotent read of their persisted result.
+    if version.status != SubmissionStatus.SUBMITTED and existing_review is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Can only review submitted versions. Current status: {version.status.value}",
@@ -84,6 +94,7 @@ async def create_manager_review(
 ):
     project = _get_owned_project(project_id, db, user)
     version = _get_owned_version(version_id, db, user)
+    db.refresh(version, with_for_update=True)
 
     sprint = db.get(Sprint, version.submission.task.sprint_id)
     if sprint.project_id != project.id:

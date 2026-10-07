@@ -20,7 +20,7 @@ from app.api.routes import (
 )
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
-from app.services.scheduler_jobs import check_high_stress_projects
+from app.services.scheduler_jobs import check_high_stress_projects, send_proactive_workplace_messages
 
 # Configure logging
 logging.basicConfig(
@@ -35,6 +35,7 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler.add_job(check_high_stress_projects, "interval", seconds=60, id="high_stress_checkin")
+    scheduler.add_job(send_proactive_workplace_messages, "interval", seconds=90, id="proactive_workplace_chat")
     scheduler.start()
     logger.info("Application startup complete")
     yield
@@ -59,6 +60,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

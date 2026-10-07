@@ -24,11 +24,15 @@ class Settings(BaseSettings):
 
     # AI provider
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-pro"
+    GEMINI_MODEL: str = "gemini-2.0-flash"
 
     # App
     ENVIRONMENT: str = "development"
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
+    # Regex fallback so local dev servers keep working when Vite falls back to
+    # another port (e.g. http://localhost:5174). Loopback only; the explicit
+    # CORS_ORIGINS list above remains the primary allow-list.
+    CORS_ORIGIN_REGEX: str = r"http://(localhost|127\.0\.0\.1)(:\d+)?"
 
     # File Upload
     MAX_UPLOAD_SIZE_MB: int = 50

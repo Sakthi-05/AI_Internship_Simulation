@@ -43,11 +43,12 @@ function templateFor(language, task) {
   return DEFAULT_CODE;
 }
 
-export default function CodeEditor({ task, project, onCodeChange, initialCode }) {
+export default function CodeEditor({ task, project, onCodeChange, onWorkChange, initialCode, readOnly = false }) {
   const taskId = task?.task_id || task?.id;
   const projectId = project?.id;
   const storageKey = `aiwse:code:${projectId || "noproject"}:${taskId || "notask"}`;
   const language = inferLanguage(task, project);
+  const fallbackCode = initialCode || templateFor(language, task);
   const [code, setCode] = useState(() => {
     try {
       const draft = localStorage.getItem(storageKey);
@@ -55,7 +56,15 @@ export default function CodeEditor({ task, project, onCodeChange, initialCode })
     } catch {
       // ignore storage errors and fall through to defaults
     }
-    return initialCode || templateFor(language, task);
+    return fallbackCode;
+  });
+  const [hasWork, setHasWork] = useState(() => {
+    try {
+      const draft = localStorage.getItem(storageKey);
+      return Boolean(draft && draft.trim() && draft !== fallbackCode);
+    } catch {
+      return false;
+    }
   });
   const [fontSize, setFontSize] = useState(14);
   const textareaRef = useRef(null);
@@ -65,9 +74,12 @@ export default function CodeEditor({ task, project, onCodeChange, initialCode })
   useEffect(() => {
     try {
       const draft = localStorage.getItem(storageKey);
-      setCode(draft || initialCode || templateFor(inferLanguage(task, project), task));
+      const nextCode = draft || fallbackCode;
+      setCode(nextCode);
+      setHasWork(Boolean(draft && draft.trim() && draft !== fallbackCode));
     } catch {
-      setCode(initialCode || templateFor(inferLanguage(task, project), task));
+      setCode(fallbackCode);
+      setHasWork(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey]);
@@ -81,6 +93,10 @@ export default function CodeEditor({ task, project, onCodeChange, initialCode })
     if (onCodeChange) onCodeChange(code);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
+
+  useEffect(() => {
+    onWorkChange?.(hasWork);
+  }, [hasWork, onWorkChange]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -161,8 +177,16 @@ export default function CodeEditor({ task, project, onCodeChange, initialCode })
         <textarea
           ref={textareaRef}
           value={code}
-          onChange={(e) => setCode(e.target.value)}
+          onChange={(e) => {
+            if (readOnly) return;
+            const nextCode = e.target.value;
+            setCode(nextCode);
+            setHasWork(Boolean(nextCode.trim() && nextCode !== fallbackCode));
+          }}
           onKeyDown={handleKeyDown}
+          readOnly={readOnly}
+          aria-readonly={readOnly}
+          title={readOnly ? "Start the task to edit your work." : undefined}
           spellCheck={false}
           className="flex-1 bg-transparent text-[#d4d4d4] p-3 font-mono resize-none outline-none leading-[1.6]"
           style={{ fontSize: `${fontSize}px`, tabSize: 2, minHeight: "100%" }}

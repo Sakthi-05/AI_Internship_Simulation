@@ -27,8 +27,15 @@ export function SimulationProvider({ children }) {
     setSimulationState(null);
   }, []);
 
+  // Clear in-memory state but keep the localStorage cache so progress
+  // survives logout/login on this browser. The backend (/api/simulations/mine)
+  // remains the source of truth on the next login.
+  const unloadSimulation = useCallback(() => {
+    setSimulationState(null);
+  }, []);
+
   return (
-    <SimulationContext.Provider value={{ simulation, setSimulation, clearSimulation }}>
+    <SimulationContext.Provider value={{ simulation, setSimulation, clearSimulation, unloadSimulation }}>
       {children}
     </SimulationContext.Provider>
   );

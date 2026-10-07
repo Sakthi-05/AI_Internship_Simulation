@@ -12,10 +12,12 @@ export default function StatusStrip({ company, project, sprintNumber, managerSco
     : "no-active-simulation";
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2 bg-surface border-b border-border font-mono text-[13px] overflow-x-auto whitespace-nowrap">
-      <span className="text-text-faint select-none">aiwse@sim</span>
-      <span className="text-text-faint select-none">:</span>
-      <span className="text-status-todo">~/{path}</span>
+    <div className="relative flex items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-white/[0.06] bg-ink/70 px-4 py-2 font-mono text-[13px] backdrop-blur-xl">
+      <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-brand-500/60 to-transparent" />
+      <span className="select-none rounded bg-gradient-to-r from-brand-500 to-accent-cyan bg-clip-text font-bold text-transparent">⬢ aiwse</span>
+      <span className="select-none text-text-faint">@sim</span>
+      <span className="select-none text-text-faint">:</span>
+      <span className="text-brand-300 drop-shadow-[0_0_8px_rgba(139,124,246,0.6)]">~/{path}</span>
       {sprintNumber ? (
         <span className="text-text-muted">
           (sprint {sprintNumber}/4)

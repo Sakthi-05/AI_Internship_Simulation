@@ -8,11 +8,13 @@ existing GeminiAIService.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import statistics
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -25,6 +27,7 @@ from app.models.intelligence import (
     ReadinessSnapshot,
     StudentProfile,
 )
+from app.models.enums import SimulationStatus
 from app.models.simulation import Simulation
 from app.models.simulation_interaction import SimulationInteraction
 from app.services.ai.ai_service import get_ai_service
@@ -41,6 +44,75 @@ COMPETENCIES = [
 ]
 
 DEFAULT_COMPETENCIES = {key: 60.0 for key in COMPETENCIES}
+
+_SITUATIONS = {
+    "decision_making": ("Requirement ambiguity", "A stakeholder changes an important requirement one day before a milestone. Decide how you respond while protecting delivery quality."),
+    "problem_solving": ("Production incident", "A monitoring alert shows elevated errors shortly after your change. The manager asks for an immediate response while customer impact is still unclear."),
+    "communication": ("Team conflict", "A teammate challenges your implementation approach during review and proposes a faster alternative with higher technical risk."),
+    "critical_thinking": ("Priority collision", "Two tasks are now urgent and only one can be completed before the deadline. You must justify what gets prioritized."),
+    "technical_knowledge": ("API failure", "A production API used by the current task is returning errors. Explain the checks you run before changing code."),
+    "adaptability": ("Scope change", "The acceptance criteria change after you have started. Decide which completed work still applies."),
+    "time_management": ("Deadline pressure", "The sprint deadline moves earlier. Decide what you finish, what you defer, and what you tell the manager."),
+    "professionalism": ("Review feedback", "A reviewer rejects your submission with specific comments. Decide how you respond and what you change."),
+}
+
+_ADAPTIVE_EXPECTED_SECONDS = {"beginner": 180, "intermediate": 300, "advanced": 450}
+
+
+def adaptive_expected_seconds(difficulty: Optional[str], task_expected_seconds: Optional[float] = None) -> float:
+    """Use a task estimate when present, otherwise a centralized difficulty estimate."""
+    if task_expected_seconds is not None and task_expected_seconds > 0:
+        return float(task_expected_seconds)
+    return float(_ADAPTIVE_EXPECTED_SECONDS.get(str(difficulty or "intermediate").lower(), 300))
+
+
+def latest_adaptive_branch(db: Session, simulation: Simulation) -> Optional[str]:
+    """Recover the last completed adaptive decision for next-task generation."""
+    latest = db.execute(
+        select(SimulationInteraction)
+        .where(
+            SimulationInteraction.simulation_id == simulation.id,
+            SimulationInteraction.interaction_type == "adaptive_situation",
+            SimulationInteraction.student_response.is_not(None),
+        )
+        .order_by(desc(SimulationInteraction.sequence))
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest is None:
+        return None
+    metadata = latest.metadata_json or {}
+    decision = metadata.get("adaptive_decision") or metadata.get("evaluation") or {}
+    branch = decision.get("branch_selected") or metadata.get("branch_selected")
+    return branch if branch in {"high_performance", "stable", "risk_escalation"} else None
+
+
+class EvaluationPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    overall_score: float = 60
+    competencies: Dict[str, float] = Field(default_factory=dict)
+    strengths: List[str] = Field(default_factory=list)
+    weaknesses: List[str] = Field(default_factory=list)
+    mistakes: List[str] = Field(default_factory=list)
+    feedback: str = ""
+    recommendations: List[str] = Field(default_factory=list)
+    next_focus: List[str] = Field(default_factory=list)
+    branch_selected: str = "stable"
+    confidence: float = 0.7
+
+
+def _difficulty_delta(overall: float) -> int:
+    if overall >= 80:
+        return 1
+    if overall < 55:
+        return -1
+    return 0
+
+
+def skill_gap_fields(profile: StudentProfile) -> Dict[str, List[str]]:
+    scores = profile.current_competencies or DEFAULT_COMPETENCIES
+    gaps = [key for key, value in sorted(scores.items(), key=lambda item: float(item[1])) if float(value) < 70]
+    return {"skill_gaps": gaps, "next_focus": gaps[:2]}
 
 
 def _clamp(value: float, low: float = 0, high: float = 100) -> float:
@@ -82,20 +154,30 @@ async def assess_student(
     skills = skills or profile.skills or []
     responses = responses or []
 
-    if settings.GEMINI_API_KEY:
+    payload = None
+    if settings.GEMINI_API_KEY and responses:
         ai = get_ai_service()
-        prompt = f"""Assess this internship candidate.
-Domain: {domain or profile.domain or 'technology'}
-Role: {role or profile.role or 'intern'}
-Skills: {skills}
-Assessment responses: {responses}
-Return JSON with competencies (keys: {COMPETENCIES}), strengths, weaknesses,
-summary, and recommended_difficulty. Scores must be 0-100."""
-        payload = await ai.generate_json(
-            prompt,
-            "You are an internship assessment engine. Score evidence, not personality. Return JSON only.",
-        )
-    else:
+        prompt = json.dumps({
+            "role": role or profile.role or "intern",
+            "domain": domain or profile.domain or "technology",
+            "skills": skills[:8],
+            "responses": [text[:500] for text in responses[:8]],
+            "competency_keys": COMPETENCIES,
+        })
+        try:
+            raw = await ai.generate_json(prompt, "Score the responses. Return JSON only with competencies, strengths, weaknesses, summary, recommended_difficulty. No reasoning.")
+            competencies = raw.get("competencies") if isinstance(raw, dict) else None
+            valid_scores = isinstance(competencies, dict) and all(
+                key in competencies
+                and isinstance(competencies[key], (int, float))
+                and not isinstance(competencies[key], bool)
+                and 0 <= competencies[key] <= 100
+                for key in COMPETENCIES
+            )
+            payload = raw if valid_scores else None
+        except Exception:
+            payload = None
+    if payload is None:
         combined = " ".join(responses).lower()
         scores = {}
         positive = sum(w in combined for w in ["because", "first", "verify", "test", "trade-off", "risk", "monitor"])
@@ -120,7 +202,7 @@ summary, and recommended_difficulty. Scores must be 0-100."""
             "recommended_difficulty": "advanced" if avg >= 78 else "intermediate" if avg >= 58 else "beginner",
         }
 
-    scores = {k: _clamp(float(payload.get("competencies", {}).get(k, 60))) for k in COMPETENCIES}
+    scores = {k: _clamp(float(payload["competencies"][k])) for k in COMPETENCIES}
     profile.full_name = profile.full_name
     profile.domain = domain or profile.domain
     profile.role = role or profile.role
@@ -167,6 +249,8 @@ async def generate_adaptive_situation(
     db: Session,
     simulation: Simulation,
     profile: StudentProfile,
+    branch: Optional[str] = None,
+    decided_difficulty: Optional[str] = None,
 ) -> Dict[str, Any]:
     interactions = db.execute(
         select(SimulationInteraction)
@@ -174,47 +258,47 @@ async def generate_adaptive_situation(
         .order_by(desc(SimulationInteraction.sequence))
         .limit(6)
     ).scalars().all()
-    history = [
-        {"situation": x.situation, "response": x.student_response, "decision": x.decision}
-        for x in reversed(interactions)
-    ]
-    weak = sorted((profile.current_competencies or DEFAULT_COMPETENCIES).items(), key=lambda x: x[1])[:2]
-    focus = ", ".join(k.replace("_", " ") for k, _ in weak)
-
-    if settings.GEMINI_API_KEY:
-        ai = get_ai_service()
-        prompt = f"""Generate the next workplace simulation situation.
-Role: {profile.role or simulation.role}
-Domain: {profile.domain or simulation.description}
-Current competencies: {profile.current_competencies}
-Recent interaction history: {history}
-Target weaker competencies: {focus}
-Return JSON: title, situation, objective, decision_options (3 short options),
-branch_hint, difficulty, consequence_if_weak, consequence_if_strong.
-The situation must depend on the supplied history and should not repeat it."""
-        payload = await ai.generate_json(prompt, "You are an adaptive internship simulation designer. Return JSON only.")
-    else:
-        seq = len(interactions) + 1
-        branch = (interactions[0].metadata_json or {}).get("branch_selected") if interactions else None
-        templates = [
-            ("Requirement ambiguity", "A stakeholder changes an important requirement one day before a milestone. Decide how you respond while protecting delivery quality.", "decision_making"),
-            ("Production incident", "A monitoring alert shows elevated errors shortly after your change. The manager asks for an immediate response while customer impact is still unclear.", "problem_solving"),
-            ("Team conflict", "A teammate challenges your implementation approach during review and proposes a faster alternative with higher technical risk.", "communication"),
-            ("Priority collision", "Two tasks are now urgent and only one can be completed before the deadline. You must justify what gets prioritized.", "critical_thinking"),
-        ]
-        title, situation, competency = templates[_stable_number(str(simulation.id) + str(seq) + str(branch), 0, len(templates) - 1)]
-        difficulty = profile.recommended_difficulty or simulation.difficulty.value
-        payload = {
-            "title": f"Adaptive Situation {seq}: {title}",
-            "situation": situation,
-            "objective": f"Demonstrate {competency.replace('_', ' ')} in a realistic workplace decision.",
-            "decision_options": ["Investigate and clarify before acting", "Act immediately with a documented risk", "Escalate with a concise recommendation"],
-            "branch_hint": competency,
-            "difficulty": difficulty,
-            "consequence_if_weak": "The issue escalates and creates additional stakeholder pressure.",
-            "consequence_if_strong": "The issue is contained and the team gains confidence in your judgment.",
-        }
-    return payload
+    scores = profile.current_competencies or DEFAULT_COMPETENCIES
+    weak = sorted(scores.items(), key=lambda item: float(item[1]))
+    focus_key = weak[0][0] if weak else "decision_making"
+    if branch == "high_performance" and scores:
+        focus_key = max(scores, key=lambda key: float(scores[key]))
+    elif branch == "stable":
+        seen = {(item.metadata_json or {}).get("branch_hint") for item in interactions}
+        if focus_key in seen and len(weak) > 1:
+            focus_key = weak[1][0]
+    if focus_key not in _SITUATIONS:
+        focus_key = "decision_making"
+    seq = len(interactions) + 1
+    title, situation = _SITUATIONS[focus_key]
+    if branch == "risk_escalation":
+        title = f"Recovery: {title}"
+        situation = "Work through this with a smaller first step. " + situation
+    elif branch == "high_performance":
+        title = f"Stretch: {title}"
+    difficulty = (
+        decided_difficulty
+        or (simulation.difficulty.value if simulation.difficulty is not None else None)
+        or profile.recommended_difficulty
+        or "intermediate"
+    )
+    task_expected_seconds = None
+    if simulation.current_task_id:
+        from app.models.task import Task
+        task = db.get(Task, simulation.current_task_id)
+        if task is not None and task.estimated_hours:
+            task_expected_seconds = float(task.estimated_hours) * 3600
+    return {
+        "title": f"Adaptive Situation {seq}: {title}",
+        "situation": situation,
+        "objective": f"Demonstrate {focus_key.replace('_', ' ')} in a realistic workplace decision.",
+        "decision_options": ["Investigate and clarify before acting", "Act immediately with a documented risk", "Escalate with a concise recommendation"],
+        "branch_hint": focus_key,
+        "difficulty": difficulty,
+        "expected_time": adaptive_expected_seconds(difficulty, task_expected_seconds),
+        "consequence_if_weak": "The issue escalates and creates additional stakeholder pressure.",
+        "consequence_if_strong": "The issue is contained and the team gains confidence in your judgment.",
+    }
 
 
 async def evaluate_interaction(
@@ -224,24 +308,27 @@ async def evaluate_interaction(
     response: str,
 ) -> Dict[str, Any]:
     profile = get_or_create_profile(db, simulation.student_id)
-    history = db.execute(
-        select(SimulationInteraction)
-        .where(SimulationInteraction.simulation_id == simulation.id)
-        .order_by(desc(SimulationInteraction.sequence))
-        .limit(5)
-    ).scalars().all()
+    weak = sorted((profile.current_competencies or DEFAULT_COMPETENCIES).items(), key=lambda item: float(item[1]))[:2]
+    target_skills = [key for key, _score in weak]
+    payload = None
     if settings.GEMINI_API_KEY:
         ai = get_ai_service()
-        prompt = f"""Evaluate this internship decision.
-Situation: {interaction.situation}
-Student response: {response}
-Current competency profile: {profile.current_competencies}
-Recent history: {[x.student_response for x in reversed(history)]}
-Return JSON with overall_score, competencies ({COMPETENCIES}), strengths, weaknesses,
-mistakes, feedback, recommendations, branch_selected (risk_escalation|stable|high_performance),
-difficulty_delta (-1,0,1), confidence (0-1). Scores 0-100."""
-        payload = await ai.generate_json(prompt, "You are a rigorous competency evaluator. Return JSON only.")
-    else:
+        prompt = json.dumps({
+            "role": profile.role or simulation.role or "intern",
+            "difficulty": profile.recommended_difficulty or "intermediate",
+            "task": (interaction.situation or "")[:400],
+            "student_response": response[:800],
+            "target_skills": target_skills,
+        })
+        try:
+            raw = await ai.generate_json(
+                prompt,
+                "Return JSON only with overall_score, competencies, strengths (max 3), weaknesses (max 3), mistakes (max 3), feedback (one short paragraph), recommendations (max 3), confidence. Scores 0-100. No reasoning.",
+            )
+            payload = EvaluationPayload.model_validate(raw).model_dump()
+        except Exception:
+            payload = None
+    if payload is None:
         text = response.strip()
         words = text.split()
         lower = text.lower()
@@ -274,18 +361,65 @@ difficulty_delta (-1,0,1), confidence (0-1). Scores 0-100."""
         }
 
     scores = {k: _clamp(float(payload.get("competencies", {}).get(k, 60))) for k in COMPETENCIES}
+    overall = _clamp(float(payload.get("overall_score", statistics.mean(scores.values()))))
+    branch = payload.get("branch_selected") or "stable"
+    if branch not in {"risk_escalation", "stable", "high_performance"}:
+        branch = "high_performance" if overall >= 78 else "risk_escalation" if overall < 58 else "stable"
     return {
-        "overall_score": _clamp(float(payload.get("overall_score", statistics.mean(scores.values())))),
+        "overall_score": overall,
         "competencies": scores,
-        "strengths": payload.get("strengths", []),
-        "weaknesses": payload.get("weaknesses", []),
-        "mistakes": payload.get("mistakes", []),
-        "feedback": payload.get("feedback", ""),
-        "recommendations": payload.get("recommendations", []),
-        "branch_selected": payload.get("branch_selected", "stable"),
-        "difficulty_delta": int(payload.get("difficulty_delta", 0)),
-        "confidence": float(payload.get("confidence", 0.75)),
+        "strengths": list(payload.get("strengths") or []),
+        "weaknesses": list(payload.get("weaknesses") or []),
+        "mistakes": list(payload.get("mistakes") or []),
+        "feedback": str(payload.get("feedback") or ""),
+        "recommendations": list(payload.get("recommendations") or []),
+        "branch_selected": branch,
+        "difficulty_delta": _difficulty_delta(overall),
+        "confidence": max(0.0, min(1.0, float(payload.get("confidence", 0.75)))),
     }
+
+
+def apply_adaptive_decision(db: Session, simulation: Simulation, profile: StudentProfile, evaluation: Dict[str, Any]) -> str:
+    """Deterministically combine evaluated quality and measured response speed."""
+    from app.models.enums import DifficultyLevel
+    from app.services.recommendation import build_simulation_recommendation
+
+    levels = list(DifficultyLevel)
+    quality = float(evaluation.get("overall_score", 60))
+    response_time = evaluation.get("response_time")
+    expected_time = evaluation.get("expected_time")
+    speed_ratio = None
+    if response_time is not None and expected_time is not None and float(expected_time) > 0:
+        speed_ratio = float(response_time) / float(expected_time)
+    if quality < 58 or (quality < 78 and speed_ratio is not None and speed_ratio > 1.2):
+        branch = "risk_escalation"
+    elif quality >= 78 and (speed_ratio is None or speed_ratio < 0.8):
+        branch = "high_performance"
+    elif quality >= 78 and speed_ratio is not None and speed_ratio <= 1.2 and speed_ratio >= 0.8:
+        branch = "high_performance"
+    else:
+        branch = "stable"
+    if quality >= 78 and speed_ratio is not None and speed_ratio > 1.2:
+        branch = "stable"
+    if branch == "high_performance":
+        delta = 1
+    elif branch == "risk_escalation":
+        delta = -1
+    else:
+        delta = 0
+    previous = simulation.difficulty.value if simulation.difficulty is not None else profile.recommended_difficulty
+    current_index = levels.index(simulation.difficulty) if simulation.difficulty in levels else 1
+    simulation.difficulty = levels[max(0, min(len(levels) - 1, current_index + delta))]
+    evaluation["branch_selected"] = branch
+    evaluation["difficulty_delta"] = delta
+    evaluation["previous_difficulty"] = previous
+    evaluation["next_difficulty"] = simulation.difficulty.value
+    evaluation["speed_ratio"] = round(speed_ratio, 4) if speed_ratio is not None else None
+    profile.recommended_difficulty = simulation.difficulty.value
+    profile.recommended_parameters = build_simulation_recommendation(profile)
+    db.add(simulation)
+    db.add(profile)
+    return simulation.difficulty.value
 
 
 def update_competencies(db: Session, profile: StudentProfile, scores: Dict[str, float]) -> Dict[str, float]:
@@ -299,6 +433,8 @@ def update_competencies(db: Session, profile: StudentProfile, scores: Dict[str, 
     profile.weaknesses = [k.replace("_", " ").title() for k, _ in sorted(current.items(), key=lambda x: x[1])[:3]]
     avg = statistics.mean(current.values())
     profile.recommended_difficulty = "advanced" if avg >= 78 else "intermediate" if avg >= 58 else "beginner"
+    from app.services.recommendation import build_simulation_recommendation
+    profile.recommended_parameters = build_simulation_recommendation(profile)
     db.add(profile)
     db.flush()
     return current
@@ -311,40 +447,52 @@ async def create_feedback_report(db: Session, student_id: str, simulation_id: Op
     evaluations = db.execute(stmt).scalars().all()
     profile = get_or_create_profile(db, student_id)
     if not evaluations:
-        score = statistics.mean((profile.current_competencies or DEFAULT_COMPETENCIES).values())
-        strengths = profile.strengths or []
-        weaknesses = profile.weaknesses or []
-        recs = ["Complete an adaptive simulation to generate evidence-based feedback."]
+        score = 0.0 if simulation_id else statistics.mean((profile.current_competencies or DEFAULT_COMPETENCIES).values())
+        strengths = [] if simulation_id else (profile.strengths or [])
+        weaknesses = [] if simulation_id else (profile.weaknesses or [])
+        recs = ["Complete evaluated work in this simulation to generate evidence-based feedback."] if simulation_id else ["Complete an adaptive simulation to generate evidence-based feedback."]
     else:
         score = statistics.mean(x.overall_score for x in evaluations)
         strengths = list(dict.fromkeys([s for x in evaluations for s in x.strengths]))[:5]
         weaknesses = list(dict.fromkeys([w for x in evaluations for w in x.weaknesses]))[:5]
         recs = list(dict.fromkeys([r for x in evaluations for r in x.recommendations]))[:6]
-    if settings.GEMINI_API_KEY:
-        ai = get_ai_service()
-        payload = await ai.generate_json(
-            f"Create a concise student performance summary. Score={score:.1f}; strengths={strengths}; weaknesses={weaknesses}; recommendations={recs}. Return JSON with summary, strengths, weaknesses, recommendations.",
-            "You are a career feedback analyst. Be evidence-based and concise. Return JSON only.",
-        )
-        summary = payload.get("summary", "")
-        strengths = payload.get("strengths", strengths)
-        weaknesses = payload.get("weaknesses", weaknesses)
-        recs = payload.get("recommendations", recs)
-        generated_by = "gemini"
-    else:
-        summary = f"Across {len(evaluations)} evaluated interactions, the current demonstrated competency average is {score:.0f}/100. Focus on {', '.join(weaknesses[:2]) or 'continued practice'} while maintaining your strengths in {', '.join(strengths[:2]) or 'core competencies'}."
-        generated_by = "offline_intelligence"
-    report = FeedbackReport(student_id=student_id, simulation_id=simulation_id, overall_score=_clamp(score), summary=summary, strengths=strengths, weaknesses=weaknesses, recommendations=recs, generated_by=generated_by)
+    gaps = skill_gap_fields(profile)
+    focus = ", ".join(gaps["next_focus"]) or "continued practice"
+    summary = (
+        f"Across {len(evaluations)} evaluated interactions, the current demonstrated competency average is {score:.0f}/100. "
+        f"Next focus: {focus}."
+    )
+    report = FeedbackReport(
+        student_id=student_id,
+        simulation_id=simulation_id,
+        overall_score=_clamp(score),
+        summary=summary,
+        strengths=strengths,
+        weaknesses=weaknesses,
+        recommendations=recs,
+        generated_by="offline_intelligence",
+    )
     db.add(report)
     db.flush()
-    return serialize_feedback(report)
+    payload = serialize_feedback(report)
+    payload.update(gaps)
+    return payload
 
 
 def calculate_readiness(db: Session, student_id: str, simulation_id: Optional[UUID] = None) -> Dict[str, Any]:
     profile = get_or_create_profile(db, student_id)
-    scores = profile.current_competencies or DEFAULT_COMPETENCIES
-    competency_avg = statistics.mean(scores.values())
-    evaluations = db.execute(select(InteractionEvaluation).where(InteractionEvaluation.student_id == student_id).order_by(InteractionEvaluation.created_at)).scalars().all()
+    evaluation_query = select(InteractionEvaluation).where(InteractionEvaluation.student_id == student_id)
+    if simulation_id:
+        evaluation_query = evaluation_query.where(InteractionEvaluation.simulation_id == simulation_id)
+    evaluations = db.execute(evaluation_query.order_by(InteractionEvaluation.created_at)).scalars().all()
+    if simulation_id:
+        scores = {}
+        for evaluation in evaluations:
+            scores.update(evaluation.competencies or {})
+        scores = scores or {key: 0.0 for key in COMPETENCIES}
+    else:
+        scores = profile.current_competencies or DEFAULT_COMPETENCIES
+    competency_avg = statistics.mean(scores.values()) if scores else 0.0
     session_scores = [float(x.overall_score) for x in evaluations]
     if len(session_scores) >= 2:
         recent = session_scores[-10:]
@@ -368,13 +516,27 @@ def calculate_readiness(db: Session, student_id: str, simulation_id: Optional[UU
     if len(session_scores) >= 3:
         recent_three = session_scores[-3:]
         if recent_three[0] > recent_three[1] > recent_three[2]:
-            alert = EarlyWarningAlert(
-                student_id=student_id, simulation_id=simulation_id, alert_type="DECLINING_PERFORMANCE", severity="warning",
-                previous_score=recent_three[0], current_score=recent_three[-1], trend_value=recent_three[-1] - recent_three[0],
-                explanation="The last three evaluated sessions show a continuous decline in overall performance.",
-                recommended_action="Target the weakest competency with a focused adaptive simulation and review the latest feedback.",
-            )
-            db.add(alert)
+            existing = db.execute(
+                select(EarlyWarningAlert).where(
+                    EarlyWarningAlert.student_id == student_id,
+                    EarlyWarningAlert.alert_type == "DECLINING_PERFORMANCE",
+                    EarlyWarningAlert.status == "OPEN",
+                )
+            ).scalars().first()
+            if existing is None:
+                existing = EarlyWarningAlert(
+                    student_id=student_id,
+                    simulation_id=simulation_id,
+                    alert_type="DECLINING_PERFORMANCE",
+                    severity="warning",
+                    explanation="The last three evaluated sessions show a continuous decline in overall performance.",
+                    recommended_action="Target the weakest competency with a focused adaptive simulation and review the latest feedback.",
+                )
+            existing.simulation_id = simulation_id or existing.simulation_id
+            existing.previous_score = recent_three[0]
+            existing.current_score = recent_three[-1]
+            existing.trend_value = recent_three[-1] - recent_three[0]
+            db.add(existing)
     snapshot = ReadinessSnapshot(
         student_id=student_id,
         simulation_id=simulation_id,
@@ -400,10 +562,16 @@ def serialize_readiness(snapshot: ReadinessSnapshot) -> Dict[str, Any]:
     return {"id": str(snapshot.id), "student_id": snapshot.student_id, "simulation_id": str(snapshot.simulation_id) if snapshot.simulation_id else None, "readiness_score": snapshot.readiness_score, "percentile": snapshot.percentile, "benchmark_score": snapshot.benchmark_score, "gap_to_benchmark": snapshot.gap_to_benchmark, "readiness_level": snapshot.readiness_level, "forecast_score": snapshot.forecast_score, "trend_direction": snapshot.trend_direction, "metrics": snapshot.metrics, "calculated_at": snapshot.calculated_at.isoformat()}
 
 
-def get_analytics(db: Session, student_id: str) -> Dict[str, Any]:
+def get_analytics(db: Session, student_id: str, simulation_id: Optional[UUID] = None) -> Dict[str, Any]:
     profile = get_or_create_profile(db, student_id)
-    evaluations = db.execute(select(InteractionEvaluation).where(InteractionEvaluation.student_id == student_id).order_by(InteractionEvaluation.created_at)).scalars().all()
-    simulations = db.execute(select(Simulation).where(Simulation.student_id == student_id).order_by(Simulation.created_at)).scalars().all()
+    evaluation_query = select(InteractionEvaluation).where(InteractionEvaluation.student_id == student_id)
+    if simulation_id:
+        evaluation_query = evaluation_query.where(InteractionEvaluation.simulation_id == simulation_id)
+    evaluations = db.execute(evaluation_query.order_by(InteractionEvaluation.created_at)).scalars().all()
+    simulation_query = select(Simulation).where(Simulation.student_id == student_id)
+    if simulation_id:
+        simulation_query = simulation_query.where(Simulation.id == simulation_id)
+    simulations = db.execute(simulation_query.order_by(Simulation.created_at)).scalars().all()
     scores = [round(x.overall_score, 2) for x in evaluations]
     trend = []
     running = {}
@@ -411,9 +579,14 @@ def get_analytics(db: Session, student_id: str) -> Dict[str, Any]:
         trend.append({"session": i, "score": evaluation.overall_score, "simulation_id": str(evaluation.simulation_id)})
         for k, v in (evaluation.competencies or {}).items():
             running[k] = v
-    latest_readiness = db.execute(select(ReadinessSnapshot).where(ReadinessSnapshot.student_id == student_id).order_by(desc(ReadinessSnapshot.calculated_at))).scalars().first()
-    alerts = db.execute(select(EarlyWarningAlert).where(EarlyWarningAlert.student_id == student_id, EarlyWarningAlert.status == "OPEN").order_by(desc(EarlyWarningAlert.created_at)).limit(10)).scalars().all()
-    return {"student_id": student_id, "profile": serialize_profile(profile), "summary": {"simulations": len(simulations), "evaluated_interactions": len(evaluations), "average_score": round(statistics.mean(scores), 2) if scores else None, "best_score": max(scores) if scores else None, "latest_score": scores[-1] if scores else None}, "competencies": running or profile.current_competencies, "score_history": trend, "readiness": serialize_readiness(latest_readiness) if latest_readiness else None, "alerts": [{"id": str(a.id), "type": a.alert_type, "severity": a.severity, "previous_score": a.previous_score, "current_score": a.current_score, "trend_value": a.trend_value, "explanation": a.explanation, "recommended_action": a.recommended_action, "created_at": a.created_at.isoformat()} for a in alerts]}
+    readiness_query = select(ReadinessSnapshot).where(ReadinessSnapshot.student_id == student_id)
+    alert_query = select(EarlyWarningAlert).where(EarlyWarningAlert.student_id == student_id, EarlyWarningAlert.status == "OPEN")
+    if simulation_id:
+        readiness_query = readiness_query.where(ReadinessSnapshot.simulation_id == simulation_id)
+        alert_query = alert_query.where(EarlyWarningAlert.simulation_id == simulation_id)
+    latest_readiness = db.execute(readiness_query.order_by(desc(ReadinessSnapshot.calculated_at))).scalars().first()
+    alerts = db.execute(alert_query.order_by(desc(EarlyWarningAlert.created_at)).limit(10)).scalars().all()
+    return {"student_id": student_id, "profile": serialize_profile(profile), "summary": {"simulations": len(simulations), "evaluated_interactions": len(evaluations), "average_score": round(statistics.mean(scores), 2) if scores else None, "best_score": max(scores) if scores else None, "latest_score": scores[-1] if scores else None}, "competencies": running or ({} if simulation_id else profile.current_competencies), "score_history": trend, "readiness": serialize_readiness(latest_readiness) if latest_readiness else None, "alerts": [{"id": str(a.id), "type": a.alert_type, "severity": a.severity, "previous_score": a.previous_score, "current_score": a.current_score, "trend_value": a.trend_value, "explanation": a.explanation, "recommended_action": a.recommended_action, "created_at": a.created_at.isoformat()} for a in alerts]}
 
 
 def list_admin_students(db: Session) -> List[Dict[str, Any]]:
@@ -426,6 +599,16 @@ def list_admin_students(db: Session) -> List[Dict[str, Any]]:
 
 
 def issue_certificate(db: Session, student_id: str, simulation_id: Optional[UUID] = None) -> Dict[str, Any]:
+    if simulation_id is None:
+        raise ValueError("Certificate eligibility requires a completed simulation")
+    simulation = db.get(Simulation, simulation_id)
+    if not simulation or simulation.student_id != student_id:
+        raise ValueError("Simulation not found for this student")
+    if simulation.status != SimulationStatus.COMPLETED or simulation.progress < 100:
+        raise ValueError("Complete the internship before requesting a certificate")
+    evaluation_count = db.execute(select(InteractionEvaluation).where(InteractionEvaluation.student_id == student_id, InteractionEvaluation.simulation_id == simulation_id)).scalars().all()
+    if not evaluation_count:
+        raise ValueError("Complete evaluated internship work before requesting a certificate")
     readiness = calculate_readiness(db, student_id, simulation_id)
     profile = get_or_create_profile(db, student_id)
     if readiness["readiness_level"] != "PLACEMENT_READY":

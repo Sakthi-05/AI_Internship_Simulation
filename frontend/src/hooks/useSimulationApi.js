@@ -97,7 +97,6 @@ export function useStartSimulationTask(simulationId) {
 }
 
 export function useSubmitSimulationTask(simulationId) {
-  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ taskId, files, metadata }) => {
       const formData = new FormData();
@@ -107,17 +106,9 @@ export function useSubmitSimulationTask(simulationId) {
       if (metadata) {
         formData.append("metadata", JSON.stringify(metadata));
       }
-      const res = await apiClient.post(`/api/simulations/${simulationId}/tasks/${taskId}/submit`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // Let the browser attach the multipart boundary required by FastAPI.
+      const res = await apiClient.post(`/api/simulations/${simulationId}/tasks/${taskId}/submit`, formData);
       return res.data;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["currentScenario", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["taskEvents", simulationId] });
     },
   });
 }
@@ -168,15 +159,40 @@ export function useRespondToEvent(simulationId, taskId) {
   });
 }
 
-export function useSimulationList() {
-  // For now, get from the generated simulations (could be extended later)
+export function useSimulationList(enabled = true) {
   return useQuery({
     queryKey: ["simulationList"],
-    queryFn: async () => {
-      // This would need a new endpoint to list simulations for a student
-      // For now, we'll use a local storage approach or the existing generation
-      return [];
-    },
-    enabled: false,
+    queryFn: async () => (await apiClient.get("/api/simulations/mine")).data,
+    enabled: Boolean(enabled),
+    staleTime: 5000,
   });
+}
+
+export function pickResumableSimulation(simulations) {
+  const list = Array.isArray(simulations) ? simulations : [];
+  // Prefer an in-progress simulation, then a not-started one. Completed or
+  // abandoned simulations are not resumable progress.
+  const byStatus = (status) => list.find((s) => s?.status === status);
+  return (
+    byStatus("in_progress") ||
+    byStatus("not_started") ||
+    null
+  );
+}
+
+export function toSimulationContext(entry, studentId) {
+  if (!entry) return null;
+  return {
+    id: entry.simulation_id || entry.id,
+    companyId: entry.company_id || entry.companyId,
+    projectId: entry.project_id || entry.projectId,
+    title: entry.title,
+    description: entry.description,
+    role: entry.role,
+    difficulty: entry.difficulty,
+    duration_weeks: entry.duration_weeks,
+    total_tasks: entry.task_count ?? entry.total_tasks,
+    status: entry.status || "not_started",
+    ...(studentId ? { studentId } : {}),
+  };
 }

@@ -22,6 +22,21 @@ logger = logging.getLogger("aiwse.scheduler")
 HIGH_STRESS_THRESHOLD = 80
 
 
+async def send_proactive_workplace_messages() -> None:
+    """Workplace liveness sweep: manager/teammates check in over time.
+
+    Runs every ~90s (see main.py). Each company with an in-progress
+    internship gets at most one ambient message per cooldown window, so the
+    chat feels like an active workplace without turning into spam. Messages
+    are persisted, so they remain visible when the student returns.
+    """
+    try:
+        from app.services import proactive_chat_service as proactive
+        await proactive.sweep_proactive_messages()
+    except Exception:
+        logger.exception("send_proactive_workplace_messages job failed")
+
+
 async def check_high_stress_projects() -> None:
     db = SessionLocal()
     try:

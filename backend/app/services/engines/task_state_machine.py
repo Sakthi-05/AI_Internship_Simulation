@@ -15,7 +15,7 @@ VALID_TRANSITIONS: dict[TaskStatus, list[TaskStatus]] = {
     TaskStatus.TODO: [TaskStatus.IN_PROGRESS, TaskStatus.BACKLOG],
     TaskStatus.IN_PROGRESS: [TaskStatus.SUBMITTED, TaskStatus.TODO, TaskStatus.BLOCKED],
     TaskStatus.SUBMITTED: [TaskStatus.UNDER_REVIEW, TaskStatus.IN_PROGRESS],
-    TaskStatus.UNDER_REVIEW: [TaskStatus.MANAGER_APPROVAL, TaskStatus.CHANGES_REQUESTED],
+    TaskStatus.UNDER_REVIEW: [TaskStatus.MANAGER_APPROVAL, TaskStatus.CHANGES_REQUESTED, TaskStatus.COMPLETED],
     TaskStatus.MANAGER_APPROVAL: [TaskStatus.COMPLETED],
     TaskStatus.CHANGES_REQUESTED: [TaskStatus.IN_PROGRESS],
     TaskStatus.BLOCKED: [TaskStatus.IN_PROGRESS, TaskStatus.TODO, TaskStatus.BACKLOG],
