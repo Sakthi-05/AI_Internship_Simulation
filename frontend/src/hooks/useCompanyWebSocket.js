@@ -28,6 +28,12 @@ export function useCompanyWebSocket(companyId) {
         retryRef.current = 0;
       };
 
+      socket.onerror = () => {
+        // Browsers intentionally hide handshake details; include only the
+        // company scope for local diagnostics, never the query-string token.
+        console.warn("Company WebSocket connection failed", { companyId });
+      };
+
       socket.onmessage = (event) => {
         try {
           const { type } = JSON.parse(event.data);
@@ -48,8 +54,14 @@ export function useCompanyWebSocket(companyId) {
         }
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (import.meta.env.DEV) {
+          console.info("Company WebSocket closed", { companyId, code: event.code, reason: event.reason });
+        }
         if (closedByUs) return;
+        // A rejected ownership/token handshake should not spin forever. A
+        // successful connection resets this counter and restores retries.
+        if (retryRef.current >= 8) return;
         const delay = Math.min(1000 * 2 ** retryRef.current, 15000);
         retryRef.current += 1;
         retryTimeout = setTimeout(connect, delay);

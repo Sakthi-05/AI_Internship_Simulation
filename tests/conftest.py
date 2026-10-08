@@ -19,6 +19,14 @@ from app.main import app  # noqa: E402
 def _setup_database():
     """Create a clean schema once per test session against a real Postgres DB."""
     Base.metadata.create_all(bind=app_engine)
+    # Review-failure support used SQL ALTER TYPE on migrated databases; the
+    # test schema is built with create_all(), which never extends an existing
+    # enum type. Mirror the migration so FAILED reviews can be persisted.
+    from app.models.enums import ReviewStatus
+
+    with app_engine.begin() as conn:
+        for value in ReviewStatus:
+            conn.execute(text(f"ALTER TYPE ai_review_status_enum ADD VALUE IF NOT EXISTS '{value.value}'"))
     yield
     with app_engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):

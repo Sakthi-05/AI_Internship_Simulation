@@ -10,7 +10,7 @@ import LoadingScreen from "../components/LoadingScreen";
 
 export default function Board() {
   const { simulation } = useSimulation();
-  const { data: board, isLoading, error } = useBoard(simulation?.projectId, simulation?.id);
+  const { data: board, isLoading, error, refetch } = useBoard(simulation?.projectId, simulation?.id);
   const updateStatus = useUpdateTaskStatus(simulation?.projectId);
   const [selectedTask, setSelectedTask] = useState(null);
   const [banner, setBanner] = useState(null);
@@ -25,7 +25,7 @@ export default function Board() {
   );
 
   if (isLoading) return <LoadingScreen label="Loading the board" />;
-  if (error) return <ErrorState message={error.message} />;
+  if (error) return <ErrorState message={error.message} onRetry={() => refetch()} />;
 
   const handleDragEnd = async (event) => {
     const { active, over } = event;
@@ -118,7 +118,7 @@ export default function Board() {
   );
 }
 
-function ErrorState({ message }) {
+function ErrorState({ message, onRetry }) {
   return (
     <div className="flex h-full items-center justify-center p-6">
       <motion.div
@@ -131,6 +131,7 @@ function ErrorState({ message }) {
         </div>
         <p className="font-display text-sm font-semibold text-status-blocked">Couldn't load the board</p>
         <p className="mt-2 text-sm text-text-muted">{message}</p>
+        <button className="btn-ghost mt-3" onClick={onRetry}>Retry</button>
       </motion.div>
     </div>
   );

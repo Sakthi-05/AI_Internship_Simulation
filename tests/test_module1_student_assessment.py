@@ -2,9 +2,20 @@
 from jose import jwt
 
 from app.core.config import settings
+from app.core.database import SessionLocal
+from app.models.user import User
 
 
 def _admin_headers():
+    # Admin authorization now checks the persisted role as well as the JWT.
+    db = SessionLocal()
+    try:
+        account = db.query(User).filter(User.student_id == "admin_module1").first()
+        if account is None:
+            db.add(User(email="admin_module1@example.com", password_hash="test-only", full_name="Test Admin", role="admin", student_id="admin_module1"))
+            db.commit()
+    finally:
+        db.close()
     token = jwt.encode(
         {"sub": "admin_module1", "student_id": "admin_module1", "role": "admin"},
         settings.JWT_SECRET_KEY,

@@ -13,6 +13,7 @@ class GenerationRequest(BaseModel):
     """
 
     student_id: str = Field(..., min_length=1)
+    generation_request_id: uuid.UUID | None = None
     role: str = Field(..., examples=["Backend Developer", "AI Engineer", "Cybersecurity"])
     technology_stack: List[str] = Field(..., min_length=1, examples=[["Python", "FastAPI", "PostgreSQL"]])
     difficulty: DifficultyLevel

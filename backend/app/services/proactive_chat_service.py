@@ -371,7 +371,7 @@ _MANAGER_TEMPLATES: Dict[str, List[str]] = {
 _TEAMMATE_TEMPLATES: Dict[str, List[str]] = {
     "question": [
         "Hey, quick question on '{task}' — how are you approaching {stack}? I might be touching the same area.",
-        "Curious how you handled {stack} in '{task}' — I hit something similar and I'm comparing notes.",
+        "Curious how you handled {stack} in '{task}' — I hit something similar and I'm comparing notes. What worked for you?",
         "When you get a sec — for '{task}', did you go with the existing pattern or something new? Asking for my own task.",
     ],
     "task_update": [
@@ -468,7 +468,9 @@ def render_proactive_message(
     seed = seed or f"{ctx['company'].id}:{category}:{ctx['proactive_count']}:{ctx['now'].strftime('%Y%m%d%H')}"
     if sender_type == MessageSenderType.MANAGER:
         variants = _MANAGER_TEMPLATES.get(category) or _MANAGER_TEMPLATES["checkin"]
-        return _pick_variant(variants, seed).format(**_manager_facts(ctx))
+        content = _pick_variant(variants, seed).format(**_manager_facts(ctx))
+        anchor = f"{ctx['company'].name} · {ctx['project'].title}"
+        return content if ctx["company"].name in content or ctx["project"].title in content else f"{anchor}: {content}"
     mate = sender if isinstance(sender, TeamMember) else None
     facts = _teammate_facts(ctx, mate) if mate is not None else {"task": "your current task"}
     variants = _TEAMMATE_TEMPLATES.get(category) or _TEAMMATE_TEMPLATES["team_discussion"]

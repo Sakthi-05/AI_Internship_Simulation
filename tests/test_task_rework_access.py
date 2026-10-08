@@ -385,8 +385,13 @@ def test_full_lifecycle_submit_review_rework_approve_complete(client):
     assert manager_approval.status_code == 201, manager_approval.text
     assert manager_approval.json()["final_task_status"] == "completed"
     current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers).json()
-    assert current["task_id"] == task2, current
-    assert client.post(f"/api/simulations/{sim_id}/tasks/{task2}/start", headers=headers).status_code == 200
+    # Technical evaluations increased difficulty. The next path entry is a
+    # simulation-owned task with advanced scope, while the shared canonical
+    # task remains unchanged.
+    assert current["task_id"] != task2, current
+    assert current["difficulty"] == "advanced", current
+    assert "Advanced" in current["title"], current
+    assert client.post(f"/api/simulations/{sim_id}/tasks/{current['task_id']}/start", headers=headers).status_code == 200
 
 
 def test_stuck_path_entry_repaired_on_load(client):

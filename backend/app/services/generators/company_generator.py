@@ -5,6 +5,8 @@ Generates a realistic Company + its Manager, persists both, and returns
 the ORM objects (caller commits).
 """
 import random
+import logging
+import time
 from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -13,6 +15,8 @@ from app.models.company import Company
 from app.models.enums import CompanyType, ManagerPersonality
 from app.models.manager import Manager
 from app.services.ai.ai_service import AIService
+
+logger = logging.getLogger(__name__)
 
 _NAME_PARTS = {
     CompanyType.STARTUP: (["Nimbus", "Sparkline", "Loopin", "Verve", "Orbitly", "Fable"], ["Labs", "AI", "Technologies", ""]),
@@ -76,6 +80,8 @@ async def generate_company(
     industry = _INDUSTRIES[company_type]
     department = rng.choice(_DEPARTMENTS_BY_ROLE_HINT)
 
+    ai_started_at = time.monotonic()
+    logger.info("Generation AI stage started stage=company_mission")
     mission = await ai_service.generate_text(
         prompt=(
             f"Write a one-sentence company mission statement for a {company_type.value} "
@@ -83,7 +89,10 @@ async def generate_company(
         ),
         system_prompt="You are a branding copywriter. Be concise, concrete, no fluff.",
     )
+    logger.info("Generation AI stage complete stage=company_mission elapsed_ms=%d", int((time.monotonic() - ai_started_at) * 1000))
 
+    ai_started_at = time.monotonic()
+    logger.info("Generation AI stage started stage=company_description")
     description = await ai_service.generate_text(
         prompt=(
             f"Write a two-sentence company description for {name}, a {company_type.value} "
@@ -91,6 +100,7 @@ async def generate_company(
         ),
         system_prompt="You are a branding copywriter. Be concise, concrete, no fluff.",
     )
+    logger.info("Generation AI stage complete stage=company_description elapsed_ms=%d", int((time.monotonic() - ai_started_at) * 1000))
 
     company = Company(
         student_id=student_id,

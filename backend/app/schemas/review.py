@@ -16,25 +16,25 @@ class AcceptanceCriterionReview(BaseModel):
 
 class CodeQualityReview(BaseModel):
     """Code quality assessment."""
-    score: int = Field(default=75, ge=0, le=100)
+    score: Optional[int] = Field(default=None, ge=0, le=100)
     feedback: str = Field(default="Code quality assessed")
 
 
 class TestingReview(BaseModel):
     """Testing assessment."""
-    score: int = Field(default=75, ge=0, le=100)
+    score: Optional[int] = Field(default=None, ge=0, le=100)
     feedback: str = Field(default="Testing assessed")
 
 
 class SecurityReview(BaseModel):
     """Security assessment."""
-    score: int = Field(default=75, ge=0, le=100)
+    score: Optional[int] = Field(default=None, ge=0, le=100)
     feedback: str = Field(default="Security assessed")
 
 
 class PerformanceReview(BaseModel):
     """Performance assessment."""
-    score: int = Field(default=75, ge=0, le=100)
+    score: Optional[int] = Field(default=None, ge=0, le=100)
     feedback: str = Field(default="Performance assessed")
 
 
@@ -46,7 +46,7 @@ class AIReviewResponse(BaseModel):
     It does NOT decide task completion - that's the Manager's role.
     """
     result: str = Field(..., pattern="^(approved|changes_required|rejected)$")
-    score: int = Field(..., ge=0, le=100)
+    score: Optional[int] = Field(default=None, ge=0, le=100)
     severity: str = Field(default="info", pattern="^(info|warning|error|critical)$")
     summary: str = Field(..., min_length=10, max_length=500)
     strengths: List[str] = Field(default_factory=list)

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import EventResponseModal from "./EventResponseModal";
 
-export default function WorkplaceEventPanel({ events, activeEvent, currentTask, onRespond, isResponding, suppressModal = false }) {
+export default function WorkplaceEventPanel({ events, activeEvent, onRespond, isResponding, suppressModal = false }) {
   const [respondingToEvent, setRespondingToEvent] = useState(null);
   useEffect(() => {
     if (suppressModal) setRespondingToEvent(null);

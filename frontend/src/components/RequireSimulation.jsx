@@ -10,23 +10,28 @@ export default function RequireSimulation({ children }) {
   const { simulation, setSimulation } = useSimulation();
 
   const needsRestore =
-    isAuthenticated && auth?.role !== "admin" && (!simulation?.companyId || !simulation?.projectId);
-  const { data: mySimulations, isLoading } = useSimulationList(needsRestore);
+    isAuthenticated && auth?.role !== "admin" && (
+      !simulation?.companyId || !simulation?.projectId || simulation?.studentId !== auth?.studentId
+    );
+  const { data: mySimulations, isLoading, error, refetch } = useSimulationList(needsRestore);
 
   useEffect(() => {
-    if (!needsRestore || isLoading || !auth?.studentId) return;
+    if (!needsRestore || isLoading || error || !auth?.studentId) return;
     const resumable = pickResumableSimulation(mySimulations);
-    if (resumable) {
-      setSimulation(toSimulationContext(resumable, auth.studentId));
-    }
-  }, [needsRestore, isLoading, mySimulations, auth?.studentId, setSimulation]);
+    if (resumable) setSimulation(toSimulationContext(resumable, auth.studentId));
+    else setSimulation(null);
+  }, [needsRestore, isLoading, error, mySimulations, auth?.studentId, setSimulation]);
 
   if (!isAuthenticated) {
     return <Navigate to="/" replace />;
   }
 
+  if (error && needsRestore) {
+    return <div className="mx-auto max-w-xl p-6"><div className="card space-y-3 p-5 text-sm text-status-blocked" role="alert">Saved internships could not be loaded: {error.message}<button className="btn-ghost ml-2" onClick={() => refetch()}>Retry</button></div></div>;
+  }
+
   if (auth?.role !== "admin") {
-    if (simulation?.companyId && simulation?.projectId) {
+    if (!needsRestore && simulation?.companyId && simulation?.projectId) {
       return children;
     }
     // No cached context (e.g. fresh browser after logout): restore saved

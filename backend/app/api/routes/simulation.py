@@ -26,7 +26,6 @@ from app.services.engines.simulation_task_state_machine import (
     get_project_status_for_simulation_state,
 )
 from app.services.submission.submission_service import SubmissionService
-from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.file_storage import FileValidationError
 from app.services.activity_log_service import log_activity
 from app.services.simulation.interaction_history_service import (
@@ -739,7 +738,6 @@ async def get_current_task(
     simulation_id: uuid.UUID,
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
-    ai_service: AIService = Depends(get_ai_service),
 ):
     """Get the current active task with full details."""
     simulation = _get_owned_simulation(simulation_id, db, user)
@@ -820,51 +818,6 @@ async def get_current_task(
                     detail="No active task for this simulation"
                 )
 
-    # Recover legacy submissions committed UNDER_REVIEW before the review
-    # request failed. Lock the latest version so a simultaneous frontend
-    # review request waits and then reuses the persisted result.
-    if task.status == TaskStatus.UNDER_REVIEW:
-        from app.models.submission import AIReview
-        from app.services.ai.review_service import ReviewService
-        pending_version = db.execute(
-            select(SubmissionVersion)
-            .join(Submission, Submission.id == SubmissionVersion.submission_id)
-            .where(Submission.task_id == task.id)
-            .order_by(SubmissionVersion.version_number.desc())
-            .limit(1)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalars().first()
-        is_stale_pending_review = bool(
-            pending_version
-            and pending_version.submitted_at
-            and pending_version.submitted_at < datetime.now(timezone.utc) - timedelta(seconds=10)
-        )
-        if is_stale_pending_review and pending_version.status in (
-            SubmissionStatus.SUBMITTED,
-            SubmissionStatus.UNDER_REVIEW,
-        ):
-            existing_review = db.execute(
-                select(AIReview.id).where(AIReview.version_id == pending_version.id)
-            ).first()
-            if existing_review is None:
-                review_service = ReviewService(ai_service)
-                await review_service.review_submission_version(db, pending_version)
-                if pending_version.status in (
-                    SubmissionStatus.APPROVED,
-                    SubmissionStatus.CHANGES_REQUESTED,
-                    SubmissionStatus.REJECTED,
-                ):
-                    await review_service.review_by_manager(db, pending_version)
-                db.refresh(simulation)
-                if simulation.current_task_id:
-                    task = db.get(Task, simulation.current_task_id)
-                else:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="No active task for this simulation",
-                    )
-    
     # Get current scenario
     current_scenario = None
     if simulation.current_scenario_id:
@@ -911,6 +864,22 @@ async def get_current_task(
     # frontend renders it in the Changes Requested section.
     from app.services.ai.review_service import get_task_review_feedback
     review_feedback = get_task_review_feedback(db, task)
+    latest_version = db.execute(
+        select(SubmissionVersion)
+        .join(Submission, Submission.id == SubmissionVersion.submission_id)
+        .where(Submission.task_id == task.id)
+        .order_by(SubmissionVersion.version_number.desc())
+        .limit(1)
+    ).scalars().first()
+    from app.models.submission import AIReview
+    latest_review = None
+    if latest_version is not None:
+        latest_review = db.execute(
+            select(AIReview)
+            .where(AIReview.version_id == latest_version.id)
+            .order_by(AIReview.created_at.desc())
+            .limit(1)
+        ).scalars().first()
 
     return {
         "task_id": str(task.id),
@@ -932,6 +901,9 @@ async def get_current_task(
         "remaining_time": remaining_time,
         "deadline_missed": deadline_missed,
         "review_feedback": review_feedback,
+        "review_version_id": str(latest_version.id) if latest_version else None,
+        "review_status": latest_review.status.value if latest_review else ("not_started" if latest_version else None),
+        "review_error": (latest_review.raw_payload or {}).get("message") if latest_review and latest_review.status.value == "failed" else None,
         "active_workplace_event": {
             "id": str(active_event.id),
             "event_type": active_event.event_type.value,
@@ -1390,6 +1362,21 @@ async def submit_simulation_task(
             f"Submission version {result.get('version')} created for task '{task.title}'",
             {"task_id": str(task.id), "version_id": result.get("version_id"), "version": result.get("version")},
         )
+        if result.get("version", 1) > 1:
+            # Resubmission after review feedback: announce it as its own event so
+            # the student sees a new attempt (and a notification) instead of a
+            # silent second submission row.
+            await trigger_event(
+                db,
+                project,
+                EventType.SUBMISSION_RESUBMITTED,
+                f"Task '{task.title}' resubmitted as version {result.get('version')}",
+                {
+                    "task_id": str(task.id),
+                    "version_id": result.get("version_id"),
+                    "new_version": result.get("version"),
+                },
+            )
     
     db.commit()
     db.refresh(task)

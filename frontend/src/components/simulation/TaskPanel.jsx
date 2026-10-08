@@ -14,6 +14,7 @@ export default function TaskPanel({
   project,
   onStart,
   onSubmit,
+  onRetryReview,
   onComplete,
   showSubmissionModal,
   setShowSubmissionModal,
@@ -340,9 +341,20 @@ export default function TaskPanel({
 
         {task.status === "under_review" && (
           <div className="p-3 bg-status-review/10 border border-status-review/20 rounded text-center">
-            <p className="text-sm text-status-review">
-              AI review in progress...
-            </p>
+            {task.review_status === "failed" ? (
+              <>
+                <p className="text-sm text-status-blocked" role="alert">
+                  {task.review_error || "Technical review failed. Your submission is saved; no score was assigned."}
+                </p>
+                {onRetryReview && task.review_version_id && (
+                  <button className="btn-ghost mt-2" onClick={() => onRetryReview(task.review_version_id)}>
+                    Retry technical review
+                  </button>
+                )}
+              </>
+            ) : (
+              <p className="text-sm text-status-review">AI review in progress...</p>
+            )}
           </div>
         )}
 
@@ -479,6 +491,15 @@ function ReviewFeedbackPanel({ feedback }) {
             </ul>
           </section>
         )}
+
+      {feedback.adaptive_decision?.status === "applied" && (
+        <div className="border-b border-accent-cyan/20 bg-accent-cyan/[0.05] px-4 py-3">
+          <p className="text-xs font-bold uppercase tracking-wider text-accent-cyan">Technical difficulty adaptation</p>
+          <p className="mt-1 text-sm font-semibold capitalize">{feedback.adaptive_decision.previous_difficulty} → {feedback.adaptive_decision.next_difficulty}</p>
+          <p className="mt-1 text-xs leading-relaxed text-text-muted">{feedback.adaptive_decision.reason}</p>
+          <p className="mt-1 text-[11px] text-text-faint">{feedback.adaptive_decision.evaluation_source === "gemini" ? "AI evaluation" : `Fallback evaluation (${feedback.adaptive_decision.evaluation_source || "mock"})`}</p>
+        </div>
+      )}
 
         {required.length > 0 && (
           <section>

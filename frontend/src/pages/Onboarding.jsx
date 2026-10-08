@@ -352,13 +352,26 @@ export default function Onboarding() {
     if (!recommendation) return;
     setFormError(null);
     try {
-      const result = await generateMutation.mutateAsync({
+      const generationPayload = {
         student_id: auth.studentId,
         role: recommendation.role,
         technology_stack: recommendation.technology_stack,
         difficulty: recommendation.difficulty,
         company_type: recommendation.company_type,
+      };
+      const storageKey = `internship-generation:${auth.studentId}`;
+      const fingerprint = JSON.stringify(generationPayload);
+      let pendingRequest;
+      try { pendingRequest = JSON.parse(sessionStorage.getItem(storageKey) || "null"); } catch { pendingRequest = null; }
+      if (!pendingRequest || pendingRequest.fingerprint !== fingerprint || !pendingRequest.requestId) {
+        pendingRequest = { fingerprint, requestId: crypto.randomUUID() };
+        sessionStorage.setItem(storageKey, JSON.stringify(pendingRequest));
+      }
+      const result = await generateMutation.mutateAsync({
+        ...generationPayload,
+        generation_request_id: pendingRequest.requestId,
       });
+      sessionStorage.removeItem(storageKey);
       setSimulation({
         companyId: result.company_id,
         projectId: result.project_id,

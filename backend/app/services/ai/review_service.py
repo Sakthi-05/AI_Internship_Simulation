@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -15,13 +17,16 @@ from app.models.submission import AIReview, ReviewHistory, SubmissionVersion
 from app.models.task import Task
 from app.schemas.review import AIManagerDecision, AIReviewResponse
 from app.services.ai.ai_service import AIService, MockAIService
-from app.services.ai.prompt_builder import build_compact_review_prompt, build_review_prompt
+from app.services.ai.prompt_builder import build_review_prompt
 from app.services.content_extraction import extract_all_submission_files
 from app.services.context.context_builder import build_review_context
 from app.services.engines.events_engine import trigger_event
 from app.services.file_storage import FileStorageService
 from app.services.notification_service import notify
 from app.services.engines.task_state_machine import validate_transition
+
+logger = logging.getLogger(__name__)
+REVIEW_PROVIDER_TIMEOUT_SECONDS = 8.0
 
 
 def _manager_decision_from_technical_review(ai_review) -> Dict[str, Any]:
@@ -98,7 +103,7 @@ def build_missing_evidence_payload(context: Dict[str, Any]) -> Dict[str, Any]:
     ]
     return AIReviewResponse.model_validate({
         "result": "changes_required",
-        "score": 30 if thin else 25,
+        "score": None,
         "severity": "warning",
         "summary": summary,
         "strengths": [],
@@ -112,13 +117,13 @@ def build_missing_evidence_payload(context: Dict[str, Any]) -> Dict[str, Any]:
             }
             for item in criteria
         ],
-        "code_quality": {"score": 30, "feedback": "Cannot assess code quality without submitted code."},
+        "code_quality": {"score": None, "feedback": "Cannot assess code quality without submitted code."},
         "testing": {
-            "score": 30,
+            "score": None,
             "feedback": "No tests or verification evidence were submitted. Run the relevant tests and include the results.",
         },
-        "security": {"score": 30, "feedback": "Cannot assess security without submitted code."},
-        "performance": {"score": 30, "feedback": "Cannot assess performance without submitted code."},
+        "security": {"score": None, "feedback": "Cannot assess security without submitted code."},
+        "performance": {"score": None, "feedback": "Cannot assess performance without submitted code."},
     }).model_dump()
 
 
@@ -177,6 +182,9 @@ def shape_review_feedback(review_payload: Dict[str, Any]) -> Dict[str, Any]:
         "test_criteria": test_criteria,
         "strengths": _clean_str_list(raw.get("strengths")),
         "missing_evidence": bool(raw.get("missing_evidence", False)),
+        "evaluation_source": raw.get("evaluation_source"),
+        "technical_evaluation": raw.get("technical_evaluation"),
+        "adaptive_decision": raw.get("adaptive_decision"),
     }
 
 
@@ -252,6 +260,10 @@ class ReviewService:
     ) -> Dict[str, Any]:
         # Build complete context for the review (includes project, task, submission history, current content)
         context = build_review_context(db, version)
+        logger.info(
+            "Technical review started submission_id=%s version_id=%s task_id=%s",
+            version.submission_id, version.id, version.submission.task_id,
+        )
 
         # Idempotent: each submitted version is reviewed exactly once. A
         # retried/duplicate request returns the saved review instead of
@@ -302,13 +314,14 @@ class ReviewService:
         )
 
         review_payload = None
+        evaluation_source = "insufficient_evidence"
         if context.get("evidence_level", "full") in ("thin", "none"):
             # Too little (or nothing) to analyze: never let the model fill
             # the vacuum with invented findings. Store a deterministic review
             # that states exactly what evidence must be provided instead.
             review_payload = build_missing_evidence_payload(context)
             review_payload["missing_evidence"] = True
-        elif isinstance(self.ai_service, MockAIService):
+        elif type(self.ai_service) is MockAIService:
             # Make local decisions stable per task attempt rather than
             # dependent on unrelated reviews processed earlier in this app.
             fallback = MockAIService()
@@ -316,15 +329,24 @@ class ReviewService:
             review_payload = AIReviewResponse.model_validate(
                 fallback._generate_mock_review()
             ).model_dump()
+            evaluation_source = "mock_fallback"
         else:
-            prompts = [prompt, build_compact_review_prompt(context)]
-            for current_prompt in prompts:
-                try:
-                    raw = await self.ai_service.generate_json(prompt=current_prompt, system_prompt=system_prompt)
-                    review_payload = AIReviewResponse.model_validate(raw).model_dump()
-                    break
-                except Exception:
-                    review_payload = None
+            logger.info("Technical review AI call started version_id=%s", version.id)
+            try:
+                raw = await asyncio.wait_for(
+                    self.ai_service.generate_json(prompt=prompt, system_prompt=system_prompt),
+                    timeout=REVIEW_PROVIDER_TIMEOUT_SECONDS,
+                )
+                review_payload = AIReviewResponse.model_validate(raw).model_dump()
+                evaluation_source = "gemini"
+                logger.info("Technical review AI call completed version_id=%s", version.id)
+            except Exception:
+                logger.warning(
+                    "Technical review AI call failed; using the existing deterministic fallback version_id=%s",
+                    version.id,
+                    exc_info=True,
+                )
+                review_payload = None
             if review_payload is None:
                 # A provider outage must not leave the committed task in
                 # UNDER_REVIEW forever. Use the same deterministic local
@@ -335,21 +357,22 @@ class ReviewService:
                 review_payload = AIReviewResponse.model_validate(
                     fallback._generate_mock_review()
                 ).model_dump()
+                evaluation_source = "mock_fallback_after_provider_error"
+
+        review_payload["evaluation_source"] = evaluation_source
 
         # Create the AIReview record
-        ai_review = AIReview(
-            version_id=version.id,
-            status=ReviewStatus.COMPLETED,
-            result=ReviewResult(review_payload["result"]),
-            severity=ReviewSeverity(review_payload["severity"]),
-            summary=review_payload["summary"],
-            strengths=review_payload.get("strengths", []),
-            risks=review_payload.get("risks", review_payload.get("issues", [])),
-            actions=review_payload.get("actions", review_payload.get("required_changes", [])),
-            score=review_payload["score"],
-            raw_payload=review_payload,
-            completed_at=None,  # will be set after commit
-        )
+        ai_review = existing_review or AIReview(version_id=version.id)
+        ai_review.status = ReviewStatus.COMPLETED
+        ai_review.result = ReviewResult(review_payload["result"])
+        ai_review.severity = ReviewSeverity(review_payload["severity"])
+        ai_review.summary = review_payload["summary"]
+        ai_review.strengths = review_payload.get("strengths", [])
+        ai_review.risks = review_payload.get("risks", review_payload.get("issues", []))
+        ai_review.actions = review_payload.get("actions", review_payload.get("required_changes", []))
+        ai_review.score = review_payload["score"]
+        ai_review.raw_payload = review_payload
+        ai_review.completed_at = datetime.now(timezone.utc)
         db.add(ai_review)
         db.flush()
 
@@ -405,7 +428,51 @@ class ReviewService:
 
         db.flush()
 
-        await _apply_review_to_competencies(db, version.submission.student_id, review_payload, project.id)
+        adaptation = {
+            "status": "not_evaluated",
+            "reason": "Insufficient implementation evidence; no technical score or difficulty change was applied.",
+            "task_id": str(task.id),
+            "submission_id": str(version.submission_id),
+            "review_id": str(ai_review.id),
+            "evaluation_source": evaluation_source,
+        }
+        if context.get("evidence_level") == "full":
+            from app.models.simulation import Simulation
+            from app.services.technical_adaptation_service import apply_technical_review_adaptation
+
+            simulation = db.execute(
+                select(Simulation).where(
+                    Simulation.project_id == project.id,
+                    Simulation.student_id == version.submission.student_id,
+                )
+            ).scalars().first()
+            if simulation is not None:
+                logger.info("Technical adaptation started review_id=%s task_id=%s", ai_review.id, task.id)
+                adaptation = await apply_technical_review_adaptation(
+                    db,
+                    simulation=simulation,
+                    task=task,
+                    version=version,
+                    review=ai_review,
+                    review_payload=review_payload,
+                    evaluation_source=evaluation_source,
+                )
+                logger.info(
+                    "Technical adaptation completed review_id=%s difficulty=%s score=%s",
+                    ai_review.id, adaptation.get("next_difficulty"), adaptation.get("technical_score"),
+                )
+            else:
+                adaptation["reason"] = "No student-owned simulation was linked to this project; technical review was stored without changing difficulty."
+        ai_review.raw_payload = {
+            **(ai_review.raw_payload or {}),
+            "technical_evaluation": (
+                ai_review.raw_payload.get("technical_evaluation")
+                if adaptation.get("status") == "applied"
+                else {"status": "not_scored", "source": evaluation_source}
+            ),
+            "adaptive_decision": adaptation,
+        }
+        db.add(ai_review)
 
         # Activity log for AI review completion
         from app.services.activity_log_service import log_activity
@@ -440,6 +507,10 @@ class ReviewService:
             )
 
         db.commit()
+        logger.info(
+            "Technical review persisted review_id=%s version_id=%s status=%s evaluation_source=%s",
+            ai_review.id, version.id, ai_review.status.value, evaluation_source,
+        )
         db.refresh(version)
         db.refresh(task)
         db.refresh(submission)
@@ -458,6 +529,8 @@ class ReviewService:
             "actions": ai_review.actions,
             "score": ai_review.score,
             "raw": review_payload,
+            "technical_evaluation": ai_review.raw_payload.get("technical_evaluation"),
+            "adaptive_decision": adaptation,
         }
 
     async def review_by_manager(

@@ -380,46 +380,25 @@ async def evaluate_interaction(
 
 
 def apply_adaptive_decision(db: Session, simulation: Simulation, profile: StudentProfile, evaluation: Dict[str, Any]) -> str:
-    """Deterministically combine evaluated quality and measured response speed."""
-    from app.models.enums import DifficultyLevel
-    from app.services.recommendation import build_simulation_recommendation
-
-    levels = list(DifficultyLevel)
-    quality = float(evaluation.get("overall_score", 60))
+    """Route workplace evidence to behavioral branches, never technical levels."""
+    previous = simulation.difficulty.value if simulation.difficulty is not None else profile.recommended_difficulty
     response_time = evaluation.get("response_time")
     expected_time = evaluation.get("expected_time")
     speed_ratio = None
     if response_time is not None and expected_time is not None and float(expected_time) > 0:
         speed_ratio = float(response_time) / float(expected_time)
-    if quality < 58 or (quality < 78 and speed_ratio is not None and speed_ratio > 1.2):
-        branch = "risk_escalation"
-    elif quality >= 78 and (speed_ratio is None or speed_ratio < 0.8):
-        branch = "high_performance"
-    elif quality >= 78 and speed_ratio is not None and speed_ratio <= 1.2 and speed_ratio >= 0.8:
-        branch = "high_performance"
-    else:
-        branch = "stable"
-    if quality >= 78 and speed_ratio is not None and speed_ratio > 1.2:
-        branch = "stable"
-    if branch == "high_performance":
-        delta = 1
-    elif branch == "risk_escalation":
-        delta = -1
-    else:
-        delta = 0
-    previous = simulation.difficulty.value if simulation.difficulty is not None else profile.recommended_difficulty
-    current_index = levels.index(simulation.difficulty) if simulation.difficulty in levels else 1
-    simulation.difficulty = levels[max(0, min(len(levels) - 1, current_index + delta))]
+
+    # Workplace choices still select stretch/recovery situations and update
+    # behavioral competencies. Technical task difficulty is only changed by
+    # an evaluated technical submission.
+    branch = evaluation.get("branch_selected") or "stable"
     evaluation["branch_selected"] = branch
-    evaluation["difficulty_delta"] = delta
+    evaluation["difficulty_delta"] = 0
     evaluation["previous_difficulty"] = previous
-    evaluation["next_difficulty"] = simulation.difficulty.value
+    evaluation["next_difficulty"] = previous
     evaluation["speed_ratio"] = round(speed_ratio, 4) if speed_ratio is not None else None
-    profile.recommended_difficulty = simulation.difficulty.value
-    profile.recommended_parameters = build_simulation_recommendation(profile)
-    db.add(simulation)
-    db.add(profile)
-    return simulation.difficulty.value
+    evaluation["evidence_kind"] = "behavioral"
+    return previous
 
 
 def update_competencies(db: Session, profile: StudentProfile, scores: Dict[str, float]) -> Dict[str, float]:
@@ -431,10 +410,8 @@ def update_competencies(db: Session, profile: StudentProfile, scores: Dict[str, 
     profile.current_competencies = current
     profile.strengths = [k.replace("_", " ").title() for k, _ in sorted(current.items(), key=lambda x: x[1], reverse=True)[:3]]
     profile.weaknesses = [k.replace("_", " ").title() for k, _ in sorted(current.items(), key=lambda x: x[1])[:3]]
-    avg = statistics.mean(current.values())
-    profile.recommended_difficulty = "advanced" if avg >= 78 else "intermediate" if avg >= 58 else "beginner"
-    from app.services.recommendation import build_simulation_recommendation
-    profile.recommended_parameters = build_simulation_recommendation(profile)
+    # Competency changes are retained as behavioral evidence, but they do not
+    # overwrite the baseline or technical difficulty recommendation.
     db.add(profile)
     db.flush()
     return current
@@ -568,15 +545,30 @@ def get_analytics(db: Session, student_id: str, simulation_id: Optional[UUID] = 
     if simulation_id:
         evaluation_query = evaluation_query.where(InteractionEvaluation.simulation_id == simulation_id)
     evaluations = db.execute(evaluation_query.order_by(InteractionEvaluation.created_at)).scalars().all()
+    interaction_rows = db.execute(
+        select(InteractionEvaluation, SimulationInteraction)
+        .join(SimulationInteraction, SimulationInteraction.id == InteractionEvaluation.interaction_id)
+        .where(InteractionEvaluation.student_id == student_id)
+        .order_by(SimulationInteraction.occurred_at)
+    ).all()
+    if simulation_id:
+        interaction_rows = [row for row in interaction_rows if row[0].simulation_id == simulation_id]
     simulation_query = select(Simulation).where(Simulation.student_id == student_id)
     if simulation_id:
         simulation_query = simulation_query.where(Simulation.id == simulation_id)
     simulations = db.execute(simulation_query.order_by(Simulation.created_at)).scalars().all()
+    technical_scores = [round(float(e.overall_score), 2) for e, interaction in interaction_rows if (interaction.metadata_json or {}).get("evidence_kind") == "technical"]
+    behavioral_scores = [round(float(e.overall_score), 2) for e, interaction in interaction_rows if (interaction.metadata_json or {}).get("evidence_kind") != "technical"]
     scores = [round(x.overall_score, 2) for x in evaluations]
     trend = []
+    evidence_kind_by_evaluation = {
+        evaluation.id: (interaction.metadata_json or {}).get("evidence_kind", "behavioral")
+        for evaluation, interaction in interaction_rows
+    }
     running = {}
     for i, evaluation in enumerate(evaluations, 1):
-        trend.append({"session": i, "score": evaluation.overall_score, "simulation_id": str(evaluation.simulation_id)})
+        kind = evidence_kind_by_evaluation.get(evaluation.id, "behavioral")
+        trend.append({"session": i, "score": evaluation.overall_score, "simulation_id": str(evaluation.simulation_id), "evidence_kind": kind})
         for k, v in (evaluation.competencies or {}).items():
             running[k] = v
     readiness_query = select(ReadinessSnapshot).where(ReadinessSnapshot.student_id == student_id)
@@ -586,7 +578,10 @@ def get_analytics(db: Session, student_id: str, simulation_id: Optional[UUID] = 
         alert_query = alert_query.where(EarlyWarningAlert.simulation_id == simulation_id)
     latest_readiness = db.execute(readiness_query.order_by(desc(ReadinessSnapshot.calculated_at))).scalars().first()
     alerts = db.execute(alert_query.order_by(desc(EarlyWarningAlert.created_at)).limit(10)).scalars().all()
-    return {"student_id": student_id, "profile": serialize_profile(profile), "summary": {"simulations": len(simulations), "evaluated_interactions": len(evaluations), "average_score": round(statistics.mean(scores), 2) if scores else None, "best_score": max(scores) if scores else None, "latest_score": scores[-1] if scores else None}, "competencies": running or ({} if simulation_id else profile.current_competencies), "score_history": trend, "readiness": serialize_readiness(latest_readiness) if latest_readiness else None, "alerts": [{"id": str(a.id), "type": a.alert_type, "severity": a.severity, "previous_score": a.previous_score, "current_score": a.current_score, "trend_value": a.trend_value, "explanation": a.explanation, "recommended_action": a.recommended_action, "created_at": a.created_at.isoformat()} for a in alerts]}
+    scoped_simulation = next((sim for sim in simulations if simulation_id is None or sim.id == simulation_id), None)
+    latest_technical_interaction = next((interaction for _evaluation, interaction in reversed(interaction_rows) if (interaction.metadata_json or {}).get("evidence_kind") == "technical"), None)
+    adaptation = (latest_technical_interaction.metadata_json or {}).get("adaptive_decision") if latest_technical_interaction else None
+    return {"student_id": student_id, "profile": serialize_profile(profile), "summary": {"simulations": len(simulations), "evaluated_interactions": len(evaluations), "average_score": round(statistics.mean(scores), 2) if scores else None, "best_score": max(scores) if scores else None, "latest_score": scores[-1] if scores else None, "technical_score": technical_scores[-1] if technical_scores else None, "average_technical_score": round(statistics.mean(technical_scores), 2) if technical_scores else None, "behavioral_score": behavioral_scores[-1] if behavioral_scores else None, "average_behavioral_score": round(statistics.mean(behavioral_scores), 2) if behavioral_scores else None}, "current_difficulty": scoped_simulation.difficulty.value if scoped_simulation and scoped_simulation.difficulty else None, "latest_adaptation": adaptation, "competencies": running or ({} if simulation_id else profile.current_competencies), "score_history": trend, "readiness": serialize_readiness(latest_readiness) if latest_readiness else None, "alerts": [{"id": str(a.id), "type": a.alert_type, "severity": a.severity, "previous_score": a.previous_score, "current_score": a.current_score, "trend_value": a.trend_value, "explanation": a.explanation, "recommended_action": a.recommended_action, "created_at": a.created_at.isoformat()} for a in alerts]}
 
 
 def list_admin_students(db: Session) -> List[Dict[str, Any]]:

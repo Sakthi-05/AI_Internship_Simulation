@@ -12,8 +12,12 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.database import get_db
+from app.models.user import User
 
 ACCESS_TOKEN_HOURS = 24
 
@@ -84,12 +88,21 @@ def get_current_user(
 def require_role(*allowed_roles: str):
     """Dependency factory for simple role-based access control."""
 
-    def _checker(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    def _checker(user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)) -> CurrentUser:
         if allowed_roles and user.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Role '{user.role}' is not permitted to access this resource",
             )
+        # Admin claims are not sufficient on their own: the role must still
+        # match the persisted account, preventing dev-token/stale-claim bypasses.
+        if any(role in {"admin", "administrator"} for role in allowed_roles):
+            account = db.execute(select(User.role).where(User.student_id == user.student_id)).scalar_one_or_none()
+            if account not in allowed_roles:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="An administrator account is required to access this resource",
+                )
         return user
 
     return _checker

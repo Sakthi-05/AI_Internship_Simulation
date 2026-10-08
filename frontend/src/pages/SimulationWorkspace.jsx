@@ -7,7 +7,6 @@ import { apiClient } from "../api/client";
 import {
   useSimulation as useSimulationQuery,
   useCreateSimulation,
-  useStartSimulation,
   useCurrentTask,
   useStartSimulationTask,
   useSubmitSimulationTask,
@@ -36,23 +35,22 @@ export default function SimulationWorkspace() {
 
   // Fetch simulation data
   const { data: simData, isLoading: simLoading, isError: simError, error: simLoadError } = useSimulationQuery(simulationId);
-  const { data: scenarioData, isLoading: scenarioLoading } = useCurrentScenario(simulationId);
-  const { data: currentTaskData, isLoading: taskLoading, isError: taskError, isFetching: taskFetching } = useCurrentTask(simulationId);
-  const { data: progressData, isLoading: progressLoading } = useSimulationProgress(simulationId);
+  const { data: scenarioData, isLoading: scenarioLoading, error: scenarioError } = useCurrentScenario(simulationId);
+  const { data: currentTaskData, isLoading: taskLoading, isError: taskError, error: taskLoadError, isFetching: taskFetching } = useCurrentTask(simulationId);
+  const { data: progressData, isLoading: progressLoading, error: progressError } = useSimulationProgress(simulationId);
   
   // Fetch company and selected project for workspace context
-  const { data: company } = useCompany(simulation?.companyId);
-  const { data: project } = useProject(simulation?.projectId);
+  const { data: company, error: companyError } = useCompany(simulation?.companyId);
+  const { data: project, error: projectError } = useProject(simulation?.projectId);
 
   // Mutations
-  const startSimulation = useStartSimulation(simulationId);
   const startTask = useStartSimulationTask(simulationId);
   const submitTask = useSubmitSimulationTask(simulationId);
   const completeTask = useCompleteSimulationTask(simulationId);
   const generateSimulation = useGenerateSimulation();
   
   // Events
-  const { data: eventsData, isLoading: eventsLoading } = useTaskEvents(
+  const { data: eventsData } = useTaskEvents(
     simulationId,
     currentTaskData?.task_id
   );
@@ -74,9 +72,10 @@ export default function SimulationWorkspace() {
   const handleStartSimulation = async (overrideSimulationId) => {
     const idToUse = overrideSimulationId || simulationId;
     if (!idToUse) {
-      alert("No simulation to start. Please create one first.");
+      setActionError("No simulation is available to start. Create an internship first.");
       return;
     }
+    setActionError("");
     try {
       await apiClient.post(`/api/simulations/${idToUse}/start`);
       setSimulation(prev => ({ ...prev, id: idToUse, status: "in_progress" }));
@@ -89,12 +88,7 @@ export default function SimulationWorkspace() {
       // Navigate to the simulation workspace to show the current task
       navigate("/simulation");
     } catch (error) {
-      console.error("Failed to start simulation:", error);
-      // Even if start fails, still navigate to simulation workspace
-      setSimulation(prev => ({ ...prev, id: idToUse, status: "in_progress" }));
-      queryClient.invalidateQueries({ queryKey: ["simulation", idToUse] });
-      queryClient.invalidateQueries({ queryKey: ["currentTask", idToUse] });
-      navigate("/simulation");
+      setActionError(error.message || "The simulation could not be started. Retry when the service is available.");
     }
   };
 
@@ -203,6 +197,27 @@ export default function SimulationWorkspace() {
     }
   };
 
+  const handleRetryReview = async (versionId) => {
+    setActionError("");
+    try {
+      const review = await apiClient.post(
+        `/api/projects/${simulation.projectId}/reviews/versions/${versionId}`
+      );
+      if (["approved", "changes_required", "rejected"].includes(review.data?.result)) {
+        await apiClient.post(
+          `/api/projects/${simulation.projectId}/reviews/versions/${versionId}/manager-review`
+        );
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] }),
+        queryClient.invalidateQueries({ queryKey: ["board", simulation?.projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] }),
+      ]);
+    } catch (error) {
+      setActionError(error.message || "Technical review could not be retried. Your submission remains saved.");
+    }
+  };
+
   // Handle event response
   const handleEventResponse = async (eventId, response) => {
     try {
@@ -215,7 +230,7 @@ export default function SimulationWorkspace() {
 
   // If no simulation selected, show selection screen
   if (!simulationId) {
-    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} />;
+    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} />;
   }
 
   // Show loading while fetching
@@ -229,6 +244,7 @@ export default function SimulationWorkspace() {
         >
           <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-status-blocked/15 text-xl shadow-[0_0_28px_-6px_rgba(239,91,91,0.7)]">⚠</div>
           {simLoadError?.message || "The simulation could not be loaded."}
+          <button className="btn-ghost mt-3 block w-full" onClick={() => queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] })}>Retry</button>
         </motion.div>
       </div>
     );
@@ -236,6 +252,19 @@ export default function SimulationWorkspace() {
 
   if (simLoading || scenarioLoading || taskLoading || progressLoading) {
     return <LoadingScreen label="Loading simulation workspace" />;
+  }
+
+  const queryError = simLoadError || taskLoadError || scenarioError || progressError;
+  if (queryError) {
+    return <div className="mx-auto max-w-xl p-6"><div className="card space-y-3 p-6 text-sm text-status-blocked" role="alert">
+      <p>Simulation data could not be loaded: {queryError.message}</p>
+      <button className="btn-ghost" onClick={() => {
+        queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
+        queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
+        queryClient.invalidateQueries({ queryKey: ["currentScenario", simulationId] });
+        queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] });
+      }}>Retry</button>
+    </div></div>;
   }
 
   const sim = simData;
@@ -251,7 +280,6 @@ export default function SimulationWorkspace() {
       <SimulationCompletionScreen
         simulation={sim}
         progress={progress}
-        company={company}
         onNewSimulation={createNewSimulation}
       />
     );
@@ -259,7 +287,7 @@ export default function SimulationWorkspace() {
 
   // Simulation not yet started — show the start screen
   if (sim?.status === "not_started") {
-    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} />;
+    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} />;
   }
 
   // No active task — determine the correct state from backend data
@@ -270,7 +298,6 @@ export default function SimulationWorkspace() {
         <SimulationCompletionScreen
           simulation={sim}
           progress={progress}
-          company={company}
           onNewSimulation={createNewSimulation}
         />
       );
@@ -364,7 +391,12 @@ export default function SimulationWorkspace() {
   }
 
   return (
-    <div className="mx-auto max-w-[1600px] space-y-4 p-4 min-h-[calc(100vh-80px)]">
+    <div className="mx-auto w-full max-w-7xl space-y-4 p-4 min-h-[calc(100vh-80px)]">
+      <header className="card flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+        <div className="min-w-0"><p className="eyebrow">{company?.name || "Internship workspace"}</p><h1 className="truncate font-display text-lg font-semibold">{sim?.role || project?.role || "Technical work"}</h1></div>
+        <div className="flex flex-wrap items-center gap-2"><span className="chip capitalize">{sim?.difficulty || project?.difficulty || "Difficulty unavailable"}</span><span className="chip">Sprint {progress?.current_sprint_number || 1}</span></div>
+      </header>
+      {(companyError || projectError) && <div className="card border-status-blocked/30 p-3 text-sm text-status-blocked" role="alert">Internship context could not be loaded: {(companyError || projectError).message}. Task data remains available where authorized.</div>}
       {/* Progress Bar at top */}
       <div className="card overflow-hidden p-0!">
         <ProgressIndicator
@@ -394,6 +426,7 @@ export default function SimulationWorkspace() {
             project={project}
             onStart={handleStartTask}
             onSubmit={handleSubmitTask}
+            onRetryReview={handleRetryReview}
             onComplete={handleCompleteTask}
             showSubmissionModal={showSubmissionModal}
             setShowSubmissionModal={setShowSubmissionModal}
@@ -411,14 +444,12 @@ export default function SimulationWorkspace() {
               scenario={scenario}
               simulation={sim}
               progress={progress}
-              company={company}
             />
           </div>
           <div className="h-[280px]">
             <WorkplaceEventPanel
               events={events}
               activeEvent={activeEvent}
-              currentTask={currentTask}
               onRespond={handleEventResponse}
               isResponding={respondToEvent.isPending}
               suppressModal={showSubmissionModal}
@@ -439,7 +470,7 @@ export default function SimulationWorkspace() {
 /**
  * Simulation selection/start screen
  */
-function SimulationSelectionScreen({ onStartSimulation }) {
+function SimulationSelectionScreen({ onStartSimulation, error }) {
   const { simulation, setSimulation } = useSimulation();
   const { auth } = useAuth();
   const createSimulation = useCreateSimulation();
@@ -470,7 +501,7 @@ function SimulationSelectionScreen({ onStartSimulation }) {
         studentId: auth?.studentId || simulation?.studentId || undefined,
       });
       // Now start it — pass the new ID directly since context update is async
-      onStartSimulation(result.simulation_id);
+      await onStartSimulation(result.simulation_id);
     } catch (err) {
       console.error("Failed to create simulation:", err);
       alert("Failed to create simulation. Please try again.");
@@ -496,6 +527,7 @@ function SimulationSelectionScreen({ onStartSimulation }) {
         >
           <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-brand-500/20 via-brand-500/[0.06] to-transparent" />
           <div className="relative">
+            {error && <p className="mb-4 rounded-xl border border-status-blocked/30 bg-status-blocked/10 p-3 text-sm text-status-blocked" role="alert">{error}</p>}
             <motion.div
               initial={{ scale: 0.7, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -582,7 +614,7 @@ function SimulationSelectionScreen({ onStartSimulation }) {
 /**
  * Simulation completion screen
  */
-function SimulationCompletionScreen({ simulation, progress, company, onNewSimulation }) {
+function SimulationCompletionScreen({ simulation, progress, onNewSimulation }) {
   const [confirmNew, setConfirmNew] = useState(false);
   const [newSimulationError, setNewSimulationError] = useState("");
   const [creatingNew, setCreatingNew] = useState(false);

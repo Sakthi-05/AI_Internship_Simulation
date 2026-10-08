@@ -2,12 +2,14 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { useSimulation } from "../context/SimulationContext";
 import { useTimeline, useMeetings } from "../hooks/useApi";
-import { useCompanyWebSocket } from "../hooks/useCompanyWebSocket";
 import LoadingScreen from "../components/LoadingScreen";
 import EmptyState from "../components/EmptyState";
 
 const KIND_META = {
   task_completed: { icon: "✓", color: "var(--color-status-completed)" },
+  task_submitted: { icon: "↑", color: "var(--color-status-review)" },
+  task_evaluated: { icon: "⌕", color: "var(--color-accent-cyan)" },
+  adaptive_decision: { icon: "⇧", color: "var(--color-brand-300)" },
   event: { icon: "⚡", color: "var(--color-status-progress)" },
   meeting: { icon: "◷", color: "var(--color-status-review)" },
   message: { icon: "◇", color: "var(--color-status-todo)" },
@@ -15,13 +17,13 @@ const KIND_META = {
 
 export default function Timeline() {
   const { simulation } = useSimulation();
-  useCompanyWebSocket(simulation?.companyId);
 
-  const { data: timeline, isLoading } = useTimeline(simulation?.projectId);
-  const { data: meetings, complete } = useMeetings(simulation?.projectId);
+  const { data: timeline, isLoading, error, refetch } = useTimeline(simulation?.projectId);
+  const { data: meetings, complete, error: meetingsError } = useMeetings(simulation?.projectId);
   const [notesById, setNotesById] = useState({});
 
   if (isLoading) return <LoadingScreen label="Loading timeline" />;
+  if (error) return <div className="mx-auto max-w-5xl p-6"><div className="card p-5 text-sm text-status-blocked" role="alert">Timeline could not be loaded: {error.message}<button className="btn-ghost ml-3" onClick={() => refetch()}>Retry</button></div></div>;
 
   const pendingMeetings = (meetings || []).filter((m) => !m.completed);
 
@@ -33,6 +35,7 @@ export default function Timeline() {
         <p className="mt-1 text-sm text-text-muted">Every task, event, meeting, and message — one living record.</p>
       </motion.div>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      {meetingsError && <p className="card text-sm text-status-blocked" role="alert">Meeting data could not be loaded: {meetingsError.message}</p>}
       <div className="lg:col-span-2">
         <div className="relative space-y-3 pl-6">
           <span className="timeline-rail absolute bottom-4 left-[9px] top-2 w-[2px] rounded-full" />

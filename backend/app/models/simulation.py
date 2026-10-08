@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import ARRAY, DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import ARRAY, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,6 +22,7 @@ class Simulation(Base, UUIDPKMixin, TimestampMixin):
     __tablename__ = "simulations"
 
     student_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    generation_request_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     company_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
@@ -85,6 +86,7 @@ class Simulation(Base, UUIDPKMixin, TimestampMixin):
     )
 
     __table_args__ = (
+        UniqueConstraint("student_id", "generation_request_id", name="uq_simulations_student_generation_request"),
         Index("ix_simulations_student_id", "student_id"),
         Index("ix_simulations_company_id", "company_id"),
         Index("ix_simulations_project_id", "project_id"),

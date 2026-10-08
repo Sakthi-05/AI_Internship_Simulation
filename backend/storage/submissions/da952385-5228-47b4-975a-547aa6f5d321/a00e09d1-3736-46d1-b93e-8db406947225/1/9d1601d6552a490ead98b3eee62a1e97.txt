@@ -1,0 +1,51 @@
+Task: Design a schema for an Intent Recognition API
+
+Requirement:
+Design a simple request/response schema for a REST API that receives a user's message and identifies the intent.
+
+Example user message:
+"I want to cancel my order."
+
+Expected intent:
+"order_cancellation"
+
+The API should accept:
+- user_message
+- user_id
+
+The API response should contain:
+- detected_intent
+- confidence
+- user_id
+
+Proposed API:
+
+POST /api/intent
+
+Request:
+{
+  "user_id": "U001",
+  "user_message": "I want to cancel my order."
+}
+
+Response:
+{
+  "user_id": "U001",
+  "detected_intent": "order_cancellation",
+  "confidence": 0.94
+}
+
+Validation:
+- user_id must not be empty.
+- user_message must not be empty.
+- confidence must be between 0 and 1.
+- detected_intent should be a valid predefined intent.
+
+Possible intents:
+- order_cancellation
+- order_status
+- refund_request
+- technical_support
+- general_query
+
+The schema should be designed so that it can later be implemented using FastAPI and Pydantic.

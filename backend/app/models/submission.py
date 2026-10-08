@@ -76,17 +76,20 @@ class AIReview(Base, UUIDPKMixin, TimestampMixin):
     status: Mapped[ReviewStatus] = mapped_column(
         Enum(ReviewStatus, name="ai_review_status_enum"), nullable=False, default=ReviewStatus.PENDING
     )
-    result: Mapped[ReviewResult] = mapped_column(
-        Enum(ReviewResult, name="ai_review_result_enum"), nullable=False
+    result: Mapped[Optional[ReviewResult]] = mapped_column(
+        Enum(ReviewResult, name="ai_review_result_enum"), nullable=True
     )
-    severity: Mapped[ReviewSeverity] = mapped_column(
-        Enum(ReviewSeverity, name="ai_review_severity_enum"), nullable=False
+    severity: Mapped[Optional[ReviewSeverity]] = mapped_column(
+        Enum(ReviewSeverity, name="ai_review_severity_enum"), nullable=True
     )
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     strengths: Mapped[List[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     risks: Mapped[List[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     actions: Mapped[List[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
-    score: Mapped[int] = mapped_column(nullable=False)
+    # Null means no meaningful score was available (for example, a submission
+    # contained no analyzable implementation). Never substitute a fabricated
+    # numeric score for missing evidence.
+    score: Mapped[Optional[int]] = mapped_column(nullable=True)
     raw_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

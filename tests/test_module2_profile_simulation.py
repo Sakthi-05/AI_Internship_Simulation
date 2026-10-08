@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.intelligence import StudentProfile
+from app.models.simulation import Simulation
 
 
 def _headers(student_id):
@@ -84,6 +85,13 @@ def test_assessed_profile_controls_generation_and_task_path(client):
     assert "problem_solving" in body["focus_competencies"]
     assert body["simulation_id"]
 
+    db = SessionLocal()
+    try:
+        saved_simulation = db.get(Simulation, body["simulation_id"])
+        assert saved_simulation.student_id == student_id
+    finally:
+        db.close()
+
     company = client.get(f"/api/companies/{body['company_id']}", headers=headers)
     assert company.status_code == 200
     assert company.json()["size"]
@@ -146,3 +154,39 @@ def test_websocket_accepts_the_owning_student(client):
         assert False, "another student must not subscribe to this company"
     except Exception:
         pass
+
+
+def test_websocket_receives_task_update_for_owning_student(client):
+    student_id = "module2_ws_event_student"
+    headers, token = _headers(student_id)
+    created = client.post(
+        "/api/generate",
+        headers=headers,
+        json={
+            "student_id": student_id,
+            "role": "Backend Developer",
+            "technology_stack": ["Python", "FastAPI"],
+            "difficulty": "intermediate",
+            "company_type": "startup",
+        },
+    )
+    assert created.status_code == 201, created.text
+    simulation_id = created.json()["simulation_id"]
+    company_id = created.json()["company_id"]
+    started = client.post(f"/api/simulations/{simulation_id}/start", headers=headers, json={})
+    assert started.status_code == 200, started.text
+    current = client.get(f"/api/simulations/{simulation_id}/tasks/current", headers=headers)
+    assert current.status_code == 200, current.text
+    task_id = current.json()["task_id"]
+
+    with client.websocket_connect(f"/ws/companies/{company_id}?token={token}") as socket:
+        updated = client.patch(
+            f"/api/tasks/{task_id}/status",
+            headers=headers,
+            json={"status": "in_progress"},
+        )
+        assert updated.status_code == 200, updated.text
+        event = socket.receive_json()
+        assert event["type"] == "task_updated", event
+        assert event["data"]["task_id"] == task_id, event
+        assert event["data"]["status"] == "in_progress", event

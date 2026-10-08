@@ -175,25 +175,26 @@ async def test_interaction_evaluation_updates_competency_and_feedback():
 
 
 @pytest.mark.asyncio
-async def test_controller_difficulty_is_what_the_next_situation_uses():
+async def test_behavioral_stretch_branch_preserves_technical_difficulty():
     student_id = f"diff-{uuid.uuid4().hex[:8]}"
     db, simulation_id, profile_id = _world(student_id)
     try:
         simulation = db.get(Simulation, simulation_id)
         profile = db.get(StudentProfile, profile_id)
+        baseline_recommendation = profile.recommended_difficulty
         decided = apply_adaptive_decision(db, simulation, profile, {"branch_selected": "high_performance", "difficulty_delta": 0})
         situation = await generate_adaptive_situation(db, simulation, profile, branch="high_performance", decided_difficulty=decided)
         db.commit()
-        assert decided == "advanced"
-        assert situation["difficulty"] == "advanced"
+        assert decided == "intermediate"
+        assert situation["difficulty"] == "intermediate"
         assert "Stretch" in situation["title"]
-        assert profile.recommended_difficulty == "advanced"
+        assert profile.recommended_difficulty == baseline_recommendation
     finally:
         db.close()
 
 
 @pytest.mark.asyncio
-async def test_risk_branch_lowers_difficulty_and_uses_recovery():
+async def test_risk_branch_uses_recovery_without_lowering_technical_difficulty():
     student_id = f"risk-{uuid.uuid4().hex[:8]}"
     db, simulation_id, profile_id = _world(student_id)
     try:
@@ -201,8 +202,8 @@ async def test_risk_branch_lowers_difficulty_and_uses_recovery():
         profile = db.get(StudentProfile, profile_id)
         decided = apply_adaptive_decision(db, simulation, profile, {"branch_selected": "risk_escalation"})
         situation = await generate_adaptive_situation(db, simulation, profile, branch="risk_escalation", decided_difficulty=decided)
-        assert decided == "beginner"
-        assert situation["difficulty"] == "beginner"
+        assert decided == "intermediate"
+        assert situation["difficulty"] == "intermediate"
         assert "Recovery" in situation["title"]
     finally:
         db.close()
@@ -215,7 +216,7 @@ async def test_risk_branch_lowers_difficulty_and_uses_recovery():
     (35, 30, 300, "beginner"),
     (92, None, None, "advanced"),
 ])
-def test_quality_and_speed_control_next_difficulty(quality, response_time, expected_time, wanted):
+def test_behavioral_quality_and_speed_do_not_control_technical_difficulty(quality, response_time, expected_time, wanted):
     student_id = f"speed-{uuid.uuid4().hex[:8]}"
     db, simulation_id, profile_id = _world(student_id)
     try:
@@ -223,12 +224,14 @@ def test_quality_and_speed_control_next_difficulty(quality, response_time, expec
         profile = db.get(StudentProfile, profile_id)
         evaluation = {"overall_score": quality, "response_time": response_time, "expected_time": expected_time}
         decided = apply_adaptive_decision(db, simulation, profile, evaluation)
-        assert decided == wanted
+        assert decided == "intermediate"
         assert evaluation["previous_difficulty"] == "intermediate"
-        assert evaluation["next_difficulty"] == wanted
+        assert evaluation["next_difficulty"] == "intermediate"
+        assert evaluation["difficulty_delta"] == 0
+        assert evaluation["evidence_kind"] == "behavioral"
         db.commit()
         db.expire_all()
-        assert db.get(Simulation, simulation_id).difficulty.value == wanted
+        assert db.get(Simulation, simulation_id).difficulty.value == "intermediate"
     finally:
         db.close()
 

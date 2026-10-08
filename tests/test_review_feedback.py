@@ -222,6 +222,62 @@ def test_metadata_response_is_analyzed_not_ignored(client, auth_headers):
     assert "No work evidence submitted" not in recorder.prompts[0]
 
 
+def test_slow_provider_uses_fallback_and_repeated_review_is_idempotent(client, auth_headers, monkeypatch):
+    """A slow provider cannot keep task/current locked past the browser timeout."""
+    import asyncio
+    from sqlalchemy import create_engine as _ce
+
+    class _SlowReviewer(AIService):
+        async def generate_text(self, prompt, system_prompt=None):
+            return "review"
+
+        async def generate_json(self, prompt, system_prompt=None):
+            await asyncio.sleep(0.2)
+            return dict(CHANGES_PAYLOAD)
+
+    monkeypatch.setattr("app.services.ai.review_service.REVIEW_PROVIDER_TIMEOUT_SECONDS", 0.01)
+    data, sim_id, task_id = _start_task(client, auth_headers)
+    version_id = _submit_task_version(
+        client,
+        auth_headers,
+        sim_id,
+        task_id,
+        metadata='{"response":"Implemented input validation in the login handler so blank passwords return the expected 400 JSON response. Added error handling for malformed credentials and wrote pytest coverage for blank password, wrong password, missing fields, and the successful login path. I would run the focused authentication tests and then the full backend suite, checking the response status and body for each case before marking the task ready."}',
+    )
+    app.dependency_overrides[get_ai_service] = lambda: _SlowReviewer()
+    try:
+        reviewed = client.post(
+            f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
+            headers=auth_headers,
+        )
+        assert reviewed.status_code == 201, reviewed.text
+        status_response = client.get(
+            f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
+            headers=auth_headers,
+        )
+        assert status_response.status_code == 200, status_response.text
+        assert status_response.json()["status"] == "completed"
+        assert status_response.json()["score"] is not None
+        assert status_response.json()["raw"]["evaluation_source"] == "mock_fallback_after_provider_error"
+
+        repeated = client.post(
+            f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
+            headers=auth_headers,
+        )
+        assert repeated.status_code == 201, repeated.text
+        assert repeated.json()["review_id"] == reviewed.json()["review_id"]
+    finally:
+        app.dependency_overrides.pop(get_ai_service, None)
+
+    engine = _ce(os.environ["DATABASE_URL"])
+    with engine.begin() as conn:
+        count = conn.execute(
+            text("SELECT count(*) FROM ai_reviews WHERE version_id = :version_id"),
+            {"version_id": version_id},
+        ).scalar_one()
+    assert count == 1
+
+
 def test_empty_submission_gets_missing_evidence_review(client, auth_headers):
     """No files and no textual evidence: deterministic guidance, no invented code."""
     from sqlalchemy import create_engine as _ce
@@ -241,6 +297,8 @@ def test_empty_submission_gets_missing_evidence_review(client, auth_headers):
     assert reviewed.status_code == 201, reviewed.text
     body = reviewed.json()
     assert body["result"] == "changes_required"
+    assert body["score"] is None
+    assert body["raw"]["code_quality"]["score"] is None
     assert body["summary"] == (
         "No implementation was submitted. "
         "Please submit your implementation and automated tests for review."
@@ -292,6 +350,7 @@ def test_thin_submission_never_reaches_the_model(client, auth_headers):
         "No implementation was submitted. "
         "Please submit your implementation and automated tests for review."
     )
+    assert reviewed.json()["score"] is None
 
     current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers)
     feedback = current.json()["review_feedback"]
@@ -401,8 +460,8 @@ def test_ai_failure_uses_deterministic_review_and_resolves_state(client, auth_he
         db.close()
 
 
-def test_current_task_refresh_recovers_previously_stuck_review(client, auth_headers):
-    """A committed UNDER_REVIEW task from a failed old request resumes on load."""
+def test_current_task_refresh_is_read_only_for_stuck_review(client, auth_headers):
+    """Task polling does not duplicate review work or block on the review lock."""
     from datetime import datetime, timedelta, timezone
 
     from app.core.database import SessionLocal
@@ -411,12 +470,12 @@ def test_current_task_refresh_recovers_previously_stuck_review(client, auth_head
 
     class _BrokenReviewer(AIService):
         async def generate_text(self, prompt, system_prompt=None):
-            raise RuntimeError("gemini down")
+            raise RuntimeError("provider unavailable")
 
         async def generate_json(self, prompt, system_prompt=None):
-            raise RuntimeError("gemini down")
+            raise RuntimeError("provider unavailable")
 
-    _, sim_id, task_id = _start_task(client, auth_headers)
+    data, sim_id, task_id = _start_task(client, auth_headers)
     version_id = _submit_task_version(
         client,
         auth_headers,
@@ -432,14 +491,26 @@ def test_current_task_refresh_recovers_previously_stuck_review(client, auth_head
         db.commit()
     finally:
         db.close()
+    resumed = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers)
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["status"] == "under_review", resumed.json()
+    assert resumed.json()["review_status"] == "not_started", resumed.json()
     app.dependency_overrides[get_ai_service] = lambda: _BrokenReviewer()
     try:
-        resumed = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers)
+        reviewed = client.post(
+            f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
+            headers=auth_headers,
+        )
     finally:
         app.dependency_overrides.pop(get_ai_service, None)
-    assert resumed.status_code == 200, resumed.text
-    assert resumed.json()["status"] == "changes_requested", resumed.json()
-    assert resumed.json()["review_feedback"] is not None
+    assert reviewed.status_code == 201, reviewed.text
+    assert reviewed.json()["result"] == "changes_required"
+    assert reviewed.json()["raw"]["evaluation_source"] == "mock_fallback_after_provider_error"
+    assert reviewed.json()["score"] is not None
+    current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers)
+    assert current.status_code == 200, current.text
+    assert current.json()["status"] == "changes_requested", current.json()
+    assert current.json()["review_feedback"] is not None
 
 
 @pytest.mark.asyncio

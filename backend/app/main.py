@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import (
     activity, assessments, auth, chat, companies, dev_auth, events, generate, meetings,
-    notifications, projects, reviews, simulation, sprints, students, submissions, tasks, team, timeline, ws, intelligence,
+    notifications, projects, reviews, simulation, sprints, students, submissions, tasks, team, timeline, ws, intelligence, admin,
 )
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
@@ -90,6 +90,7 @@ app.include_router(submissions.router)
 app.include_router(reviews.router)
 app.include_router(ws.router)
 app.include_router(intelligence.router)
+app.include_router(admin.router)
 
 
 @app.get("/health", tags=["System"])

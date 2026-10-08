@@ -16,7 +16,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import ScenarioStatus, SimulationStatus, SprintStatus, TaskStatus
+from app.models.enums import DifficultyLevel, ScenarioStatus, SimulationStatus, SprintStatus, TaskStatus
 from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
 from app.models.simulation import Simulation, Scenario, ScenarioTask
@@ -66,6 +66,7 @@ async def progress_to_next_task(
         if next_path_entry:
             next_task = db.get(Task, next_path_entry.task_id)
             if next_task:
+                next_task = _materialize_difficulty_task(db, simulation, next_path_entry, next_task)
                 if next_task.status == TaskStatus.BACKLOG:
                     next_task.status = TaskStatus.TODO
                 if next_path_entry.status == TaskStatus.BACKLOG:
@@ -182,6 +183,59 @@ async def progress_to_next_task(
     
     # No more uncompleted tasks in current scenario - check if scenario is truly complete
     return await _progress_to_next_scenario(db, simulation, current_scenario, user_id)
+
+
+def _materialize_difficulty_task(db: Session, simulation: Simulation, path_entry: SimulationTaskPath, source: Task) -> Task:
+    """Give this simulation a task whose work scope matches its new level.
+
+    Canonical tasks are shared across simulations, so adapting one in place
+    would leak a student's difficulty to other students. Replace only this
+    simulation's next path link with a scoped copy when the level changes.
+    """
+    level = simulation.difficulty
+    if not level or source.difficulty == level:
+        return source
+    requirements = {
+        DifficultyLevel.BEGINNER: [
+            "Break the work into small, verifiable steps and document assumptions.",
+            "Add a focused test for the main success case and one invalid-input case.",
+        ],
+        DifficultyLevel.INTERMEDIATE: [
+            "Implement the complete behavior and cover boundary cases with automated tests.",
+            "Document the design trade-offs and validate failure handling.",
+        ],
+        DifficultyLevel.ADVANCED: [
+            "Design for edge cases, operational failure, and maintainability.",
+            "Add tests for correctness and failure modes, and justify performance/security trade-offs.",
+        ],
+        DifficultyLevel.EXPERT: [
+            "Design for scale, resilience, and measurable operational constraints.",
+            "Provide comprehensive correctness, security, and performance validation with trade-off analysis.",
+        ],
+    }
+    tier_criteria = requirements.get(level, requirements[DifficultyLevel.INTERMEDIATE])
+    clone = Task(
+        sprint_id=source.sprint_id,
+        sequence=source.sequence,
+        title=f"{source.title} — {level.value.title()}",
+        description=(
+            f"{source.description}\n\nDifficulty: {level.value.title()}. "
+            "Complete the original objective at this level of independence and validation."
+        ),
+        acceptance_criteria=list(source.acceptance_criteria or []) + tier_criteria,
+        priority=source.priority,
+        status=TaskStatus.BACKLOG,
+        task_type=source.task_type,
+        difficulty=level,
+        estimated_hours=source.estimated_hours,
+        deadline=source.deadline,
+    )
+    db.add(clone)
+    db.flush()
+    path_entry.task_id = clone.id
+    db.add(path_entry)
+    db.flush()
+    return clone
 
 
 async def _progress_to_next_scenario(
@@ -360,7 +414,7 @@ def _sync_sprint_completion(db: Session, simulation: Simulation, sprint_id: UUID
                 select(Sprint)
                 .where(Sprint.project_id == sprint.project_id, Sprint.sprint_number > sprint.sprint_number)
                 .order_by(Sprint.sprint_number)
-            ).scalar_one_or_none()
+            ).scalars().first()
             if next_sprint:
                 state.current_sprint_number = next_sprint.sprint_number
                 db.add(state)

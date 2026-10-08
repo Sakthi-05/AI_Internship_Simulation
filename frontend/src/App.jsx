@@ -9,6 +9,7 @@ import Timeline from "./pages/Timeline";
 import SimulationWorkspace from "./pages/SimulationWorkspace";
 import Intelligence from "./pages/Intelligence";
 import Admin from "./pages/Admin";
+import RequireAdmin from "./components/RequireAdmin";
 
 export default function App() {
   return (
@@ -26,7 +27,7 @@ export default function App() {
         <Route path="/chat" element={<Chat />} />
         <Route path="/timeline" element={<Timeline />} />
         <Route path="/intelligence" element={<Intelligence />} />
-        <Route path="/admin" element={<Admin />} />
+        <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
         <Route path="/simulation" element={<SimulationWorkspace />} />
       </Route>
     </Routes>

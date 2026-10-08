@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSimulation } from "../context/SimulationContext";
 import { useManager, useTeam, useManagerChat, useTeamChat } from "../hooks/useApi";
-import { useCompanyWebSocket } from "../hooks/useCompanyWebSocket";
 
 export function formatChatTime(iso) {
   if (!iso) return "";
@@ -13,7 +12,6 @@ export function formatChatTime(iso) {
 
 export default function Chat() {
   const { simulation } = useSimulation();
-  useCompanyWebSocket(simulation?.companyId);
 
   const { data: manager } = useManager(simulation?.companyId);
   const { data: team } = useTeam(simulation?.companyId);

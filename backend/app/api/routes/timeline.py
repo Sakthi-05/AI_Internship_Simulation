@@ -22,6 +22,8 @@ from app.models.meeting import MeetingSchedule
 from app.models.project import Project
 from app.models.sprint import Sprint
 from app.models.task import Task
+from app.models.simulation import Simulation
+from app.models.simulation_interaction import SimulationInteraction
 from app.schemas.misc import TimelineEntry
 
 router = APIRouter(prefix="/api/projects/{project_id}/timeline", tags=["Timeline"])
@@ -71,6 +73,49 @@ def get_timeline(
             kind="message", title=f"{msg.sender_type.value} message",
             detail=msg.content[:120], timestamp=msg.created_at,
         ))
+
+    simulations = db.execute(
+        select(Simulation).where(
+            Simulation.project_id == project_id,
+            Simulation.student_id == user.student_id,
+        )
+    ).scalars().all()
+    for simulation in simulations:
+        interactions = db.execute(
+            select(SimulationInteraction)
+            .where(SimulationInteraction.simulation_id == simulation.id)
+            .order_by(SimulationInteraction.occurred_at)
+        ).scalars().all()
+        for interaction in interactions:
+            meta = interaction.metadata_json or {}
+            event_type = interaction.interaction_type
+            if event_type not in {"task_submitted", "task_evaluated", "adaptive_decision"}:
+                continue
+            title = {
+                "task_submitted": "Task submission",
+                "task_evaluated": "Technical evaluation",
+                "adaptive_decision": "Difficulty adaptation",
+            }[event_type]
+            adaptation = meta.get("adaptive_decision") or {}
+            detail = (
+                adaptation.get("reason")
+                or meta.get("summary")
+                or meta.get("task_title")
+                or interaction.decision
+            )
+            entries.append(TimelineEntry(
+                kind=event_type,
+                title=title,
+                detail=str(detail)[:500] if detail else None,
+                timestamp=interaction.occurred_at,
+            ))
+            if event_type == "task_evaluated" and adaptation:
+                entries.append(TimelineEntry(
+                    kind="adaptive_decision",
+                    title=f"Difficulty: {adaptation.get('previous_difficulty', 'unknown')} → {adaptation.get('next_difficulty', 'unknown')}",
+                    detail=str(adaptation.get("reason") or "Technical evaluation recorded.")[:500],
+                    timestamp=interaction.occurred_at,
+                ))
 
     entries.sort(key=lambda e: e.timestamp)
     return entries

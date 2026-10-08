@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 
-export default function ScenarioPanel({ scenario, simulation, progress, company }) {
+export default function ScenarioPanel({ scenario, simulation, progress }) {
   if (!scenario) {
     return (
       <div className="card p-4 flex flex-col">

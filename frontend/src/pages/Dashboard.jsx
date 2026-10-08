@@ -18,11 +18,15 @@ export default function Dashboard() {
   const { data: project, isLoading: projectLoading } = useProject(simulation?.projectId);
   const { data: state } = useProjectState(simulation?.projectId);
   const { data: sprints } = useSprints(simulation?.projectId);
-  const { data: board } = useBoard(simulation?.projectId);
+  const { data: board, isLoading: boardLoading, error: boardError, refetch: refetchBoard } = useBoard(simulation?.projectId, simulation?.id);
 
   if (companyLoading || projectLoading || !company || !project) {
-    return <LoadingScreen label="Loading dashboard" />;
+    if (companyLoading || projectLoading) return <LoadingScreen label="Loading dashboard" />;
+    return <div className="mx-auto max-w-6xl p-6"><div className="card p-5 text-sm text-status-blocked">Dashboard data could not be loaded. Check your internship access and retry.<button className="btn-ghost ml-3" onClick={() => window.location.reload()}>Retry</button></div></div>;
   }
+
+  if (boardLoading) return <LoadingScreen label="Loading dashboard tasks" />;
+  if (boardError) return <div className="mx-auto max-w-6xl p-6"><div className="card p-5 text-sm text-status-blocked" role="alert">Task data could not be loaded: {boardError.message}<button className="btn-ghost ml-3" onClick={() => refetchBoard()}>Retry</button></div></div>;
 
   const totalTasks = board ? Object.values(board).reduce((sum, arr) => sum + arr.length, 0) : 0;
   const completedTasks = board?.completed?.length || 0;

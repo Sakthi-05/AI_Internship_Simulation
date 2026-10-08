@@ -2,7 +2,9 @@ import axios from "axios";
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
-export const apiClient = axios.create({ baseURL });
+// Bound requests so REST-backed views can leave their loading state and show
+// an error/retry action when the API is unreachable.
+export const apiClient = axios.create({ baseURL, timeout: 15000 });
 
 let currentToken = null;
 let authFailureHandler = null;

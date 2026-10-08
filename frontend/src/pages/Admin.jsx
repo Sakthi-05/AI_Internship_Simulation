@@ -1,115 +1,113 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "../api/client";
 
+const emptyDashboard = { total_students: 0, active_students: 0, baseline_completed: 0, simulations_in_progress: 0, simulations_completed: 0, average_readiness: null, average_competency: null, assessments_completed: 0, simulations_count: 0, feedback_reports: 0, students_needing_attention: 0 };
+const date = (value) => value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—";
+const percent = (value) => value == null ? "—" : `${Math.round(value)}%`;
+
+function Metric({ label, value, hint, accent = "brand" }) {
+  const colors = { brand: "text-brand-200", cyan: "text-accent-cyan", green: "text-status-completed", amber: "text-status-progress" };
+  return <article className="card p-4 sm:p-5"><p className="eyebrow">{label}</p><p className={`mt-2 font-display text-2xl font-bold ${colors[accent]}`}>{value ?? "—"}</p>{hint && <p className="mt-1 text-xs text-text-faint">{hint}</p>}</article>;
+}
+
+function BarList({ title, rows, nameKey, valueKey = "count", empty = "No recorded data yet." }) {
+  const max = Math.max(1, ...(rows || []).map((row) => Number(row[valueKey]) || 0));
+  return <section className="card p-5"><h2 className="font-display text-sm font-semibold">{title}</h2>{!rows?.length ? <p className="mt-4 text-sm text-text-faint">{empty}</p> : <div className="mt-4 space-y-3">{rows.map((row) => <div key={row[nameKey]}><div className="mb-1 flex justify-between gap-2 text-xs"><span className="capitalize text-text-muted">{String(row[nameKey]).replaceAll("_", " ")}</span><span className="font-mono text-text">{row[valueKey]}</span></div><div className="progress-track h-2"><div className="progress-fill h-full" style={{ width: `${Math.max(row[valueKey] ? 5 : 0, (Number(row[valueKey]) / max) * 100)}%` }} /></div></div>)}</div>}</section>;
+}
+
+function CompetencyBars({ baseline, current }) {
+  const keys = [...new Set([...Object.keys(baseline || {}), ...Object.keys(current || {})])];
+  return <div className="space-y-3">{keys.length === 0 ? <p className="text-sm text-text-faint">Competency evidence has not been recorded.</p> : keys.map((key) => {
+    const before = baseline?.[key]; const now = current?.[key];
+    return <div key={key}><div className="mb-1 flex justify-between text-xs"><span className="capitalize text-text-muted">{key.replaceAll("_", " ")}</span><span className="font-mono">{now == null ? "—" : `${Math.round(now)}%`}{before != null && now != null && <span className={now >= before ? "ml-2 text-status-completed" : "ml-2 text-status-blocked"}>{now - before >= 0 ? "+" : ""}{Math.round(now - before)}</span>}</span></div><div className="relative h-2 overflow-hidden rounded-full bg-white/[0.07]"><div className="absolute h-full rounded-full bg-accent-cyan/50" style={{ width: `${Math.min(100, Math.max(0, before || 0))}%` }} /><div className="absolute h-full rounded-full bg-gradient-to-r from-brand-500 to-accent-cyan opacity-80" style={{ width: `${Math.min(100, Math.max(0, now || 0))}%` }} /></div></div>;
+  })}</div>;
+}
+
+function AssessmentBank() {
+  const [open, setOpen] = useState(false); const [questions, setQuestions] = useState([]);
+  const [prompt, setPrompt] = useState(""); const [competency, setCompetency] = useState("technical_knowledge"); const [error, setError] = useState("");
+  const load = async () => { try { const response = await apiClient.get("/api/admin/questions"); setQuestions(response.data.questions || []); } catch (err) { setError(err.message); } };
+  useEffect(() => { if (open) load(); }, [open]);
+  const add = async (event) => { event.preventDefault(); setError(""); try { await apiClient.post("/api/admin/questions", { prompt, competency, question_type: "short_answer", rubric_keywords: ["because", "risk", "test"] }); setPrompt(""); await load(); } catch (err) { setError(err.message); } };
+  const retire = async (id) => { setError(""); try { await apiClient.delete(`/api/admin/questions/${id}`); await load(); } catch (err) { setError(err.message); } };
+  return <section className="card overflow-hidden"><button className="flex w-full items-center justify-between p-5 text-left" onClick={() => setOpen((value) => !value)}><span><span className="eyebrow block">Existing admin tools</span><span className="mt-1 block font-display text-lg font-semibold">Baseline question bank</span></span><span className="chip">{open ? "Hide" : "Manage"}</span></button>{open && <div className="space-y-4 border-t border-white/[0.06] p-5">{error && <p className="text-sm text-status-blocked">{error}</p>}<form onSubmit={add} className="flex flex-wrap gap-2"><input className="input min-w-64 flex-1" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="New short-answer prompt" required minLength={8}/><input className="input w-52" value={competency} onChange={(e) => setCompetency(e.target.value)}/><button className="btn-primary" type="submit">Add question</button></form><ul className="space-y-2 text-sm">{questions.filter((question) => question.active).map((question) => <li key={question.id} className="flex items-start justify-between gap-3 rounded-xl border border-white/[0.05] p-3"><span><span className="chip mr-2">{question.competency}</span>{question.prompt}</span><button className="btn-ghost" onClick={() => retire(question.id)}>Retire</button></li>)}</ul></div>}</section>;
+}
+
+function StudentDetail({ studentId, onClose }) {
+  const [data, setData] = useState(null); const [events, setEvents] = useState([]); const [error, setError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    Promise.all([apiClient.get(`/api/admin/students/${encodeURIComponent(studentId)}`), apiClient.get(`/api/admin/students/${encodeURIComponent(studentId)}/activity`)]).then(([detail, activity]) => {
+      if (alive) { setData(detail.data); setEvents(activity.data.events || []); }
+    }).catch((err) => alive && setError(err.message));
+    return () => { alive = false; };
+  }, [studentId]);
+  if (error) return <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/90 p-4 backdrop-blur-sm"><div className="mx-auto max-w-5xl"><button className="btn-ghost mb-4" onClick={onClose}>← Back</button><div className="card p-6 text-status-blocked">Could not load student details: {error}</div></div></div>;
+  if (!data) return <div className="fixed inset-0 z-50 grid place-items-center bg-ink/90"><div className="card p-8 text-sm text-text-muted">Loading student journey…</div></div>;
+  const { profile, baseline, competencies, internship, simulations, simulation_summary: summary, feedback, readiness } = data;
+  return <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/90 p-4 backdrop-blur-sm sm:p-8"><div className="mx-auto max-w-6xl space-y-5 pb-8">
+    <div className="card flex flex-wrap items-start justify-between gap-4 p-5"><div><button className="btn-ghost mb-3" onClick={onClose}>← All students</button><p className="eyebrow">Student monitoring</p><h1 className="font-display text-2xl font-bold">{profile.name}</h1><p className="mt-1 text-sm text-text-muted">{profile.email} · Registered {date(profile.registered_at)}</p><p className="mt-1 text-xs text-text-faint">{profile.role ? `Profile role: ${profile.role}` : "Profile role not recorded"}{profile.target_role ? ` · Target: ${profile.target_role}` : ""}{profile.domain ? ` · ${profile.domain}` : ""}</p></div><div className="flex gap-2"><span className="chip">Readiness {percent(readiness?.score)}</span><span className="chip">{readiness?.level?.replaceAll("_", " ") || "No readiness data"}</span></div></div>
+
+    <section className="card overflow-hidden p-5"><p className="eyebrow">Adaptive learning journey</p><div className="mt-4 grid gap-2 md:grid-cols-7">{["Baseline", "Competencies", "Simulation", "AI Evaluation", "Adaptive Decision", "Difficulty", "Readiness"].map((step, i) => <div key={step} className="flex items-center gap-2"><div className="min-h-20 flex-1 rounded-xl border border-brand-400/20 bg-brand-500/[0.07] p-3"><p className="font-mono text-[10px] text-brand-300">0{i + 1}</p><p className="mt-2 text-xs font-semibold">{step}</p><p className="mt-1 text-[10px] leading-relaxed text-text-faint">{[percent(baseline.score), `${Object.keys(competencies.current || {}).length} tracked`, `${summary.count} attempt(s)`, `${summary.evaluations.length} scored`, `${summary.adaptive_transitions.length} decisions`, summary.adaptive_transitions.at(-1)?.to || baseline.recommended_level || "—", percent(readiness?.score)][i]}</p></div>{i < 6 && <span className="hidden text-brand-300 md:block">→</span>}</div>)}</div></section>
+
+    <div className="grid gap-5 lg:grid-cols-2"><section className="card p-5"><p className="eyebrow">Baseline assessment</p><h2 className="mt-1 font-display text-lg font-semibold">{baseline.status === "completed" ? percent(baseline.score) : baseline.status.replaceAll("_", " ")}</h2><p className="text-xs text-text-faint">{baseline.answered_count}/{baseline.question_count} answers · {date(baseline.completed_at)}</p><div className="mt-4 grid grid-cols-2 gap-4 text-sm"><div><p className="text-xs text-text-faint">Strengths</p><p className="mt-1">{baseline.strengths?.join(", ") || "—"}</p></div><div><p className="text-xs text-text-faint">Growth areas</p><p className="mt-1">{baseline.weaknesses?.join(", ") || "—"}</p></div></div><p className="mt-4 text-xs text-text-muted">Recommended level: <span className="capitalize">{baseline.recommended_level || "—"}</span></p></section>
+      <section className="card p-5"><p className="eyebrow">Competency profile</p><div className="mt-4"><CompetencyBars baseline={competencies.baseline} current={competencies.current} /></div><p className="mt-3 text-[10px] text-text-faint">Cyan underlay: baseline · Gradient overlay: current evidence</p></section></div>
+
+    <section className="card p-5"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="eyebrow">Internship and simulation</p><h2 className="mt-1 font-display text-lg font-semibold">{internship?.project || "No internship assignment recorded"}</h2></div><span className="chip">{internship?.status?.replaceAll("_", " ") || "Not started"}</span></div>{internship && <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4"><div><p className="text-xs text-text-faint">Company / role</p>{internship.company || "—"} · {internship.role || "—"}</div><div><p className="text-xs text-text-faint">Stack</p>{internship.technology_stack?.join(", ") || "—"}</div><div><p className="text-xs text-text-faint">Difficulty / sprint</p><span className="capitalize">{internship.difficulty || "—"}</span> · {internship.current_sprint ?? "—"}</div><div><p className="text-xs text-text-faint">Current task / dates</p>{internship.current_task || "—"}<div className="text-xs text-text-faint">{date(internship.start_date)} – {date(internship.end_date)}</div></div></div>}
+      <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><Metric label="Simulations" value={summary.count} hint={`${summary.completed} completed`} /><Metric label="Latest technical score" value={percent(summary.technical_score)} hint="Technical work evidence" accent="cyan" /><Metric label="Latest behavioral score" value={percent(summary.behavioral_score)} hint="Workplace decision evidence" accent="amber" /><Metric label="Average evaluation" value={percent(summary.average_score)} hint={`${summary.evaluation_count} evaluations · ${summary.performance_trend || "trend unavailable"}`} accent="cyan" /><Metric label="Recent avg response time" value={summary.average_response_time == null ? "—" : `${summary.average_response_time}s`} hint="Based on recent stored responses" accent="amber" /></div>
+      {internship && <div className="mt-4 grid gap-3 rounded-xl border border-white/[0.06] p-4 text-sm sm:grid-cols-2 xl:grid-cols-4"><p>Latest task status <strong className="ml-1 capitalize">{internship.task_status || "—"}</strong></p><p>Submission status <strong className="ml-1 capitalize">{internship.submission_status || "—"}</strong></p><p>Evaluation status <strong className="ml-1 capitalize">{internship.evaluation_status || "—"}</strong></p><p>Latest technical score <strong className="ml-1">{percent(internship.latest_technical_score)}</strong></p></div>}
+      {simulations.length > 0 && <div className="mt-4 space-y-2">{simulations.map((sim) => <div key={sim.id} className="flex flex-wrap justify-between gap-2 rounded-xl border border-white/[0.06] p-3 text-sm"><span>{sim.title} <span className="text-text-faint">· {sim.company} · {sim.project}</span></span><span className="capitalize text-text-muted">{sim.status} · {sim.difficulty} · {sim.progress}%</span></div>)}</div>}
+    </section>
+
+    <div className="grid gap-5 lg:grid-cols-2"><section className="card p-5"><p className="eyebrow">Technical and behavioral adaptation</p><h2 className="mt-1 font-display text-lg font-semibold">Evidence → system decision</h2>{summary.adaptive_transitions.length ? <div className="mt-4 space-y-2">{[...summary.adaptive_transitions].reverse().map((item, i) => <div key={`${item.at}-${i}`} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/[0.06] p-3 text-sm"><div><span className="capitalize">{item.from || "—"} → {item.to || "—"}</span><p className="mt-1 text-xs text-text-faint">{item.reason || "Adaptive rule"}{item.response_time != null ? ` · ${Math.round(item.response_time)}s response` : ""}</p></div><div className="text-right"><span className="chip capitalize">{item.evidence_kind || item.branch || "decision recorded"}</span><p className="mt-1 font-mono text-xs">{percent(item.score)} · {date(item.at)}</p></div></div>)}</div> : <p className="mt-4 text-sm text-text-faint">No adaptive transitions are recorded yet.</p>}</section>
+      <section className="card p-5"><p className="eyebrow">Latest feedback and readiness</p>{feedback.latest ? <><h2 className="mt-1 font-display text-lg font-semibold">Feedback · {percent(feedback.latest.score)}</h2><p className="mt-2 text-sm text-text-muted">{feedback.latest.summary}</p><div className="mt-3 grid grid-cols-2 gap-3 text-xs"><div><span className="text-text-faint">Strengths</span><p className="mt-1">{feedback.latest.strengths?.join(", ") || "—"}</p></div><div><span className="text-text-faint">Growth areas</span><p className="mt-1">{feedback.latest.weaknesses?.join(", ") || "—"}</p></div></div><ul className="mt-3 list-inside list-disc text-xs text-text-muted">{feedback.latest.recommendations?.map((r) => <li key={r}>{r}</li>)}</ul><p className="mt-3 text-[10px] text-text-faint">Generated {date(feedback.latest.generated_at)}</p></> : <p className="mt-4 text-sm text-text-faint">No feedback report recorded.</p>}<div className="mt-5 border-t border-white/[0.06] pt-4 text-sm"><p>Readiness <strong className="ml-2 font-mono text-accent-cyan">{percent(readiness?.score)}</strong> <span className="ml-2 text-xs text-text-muted">{readiness?.level?.replaceAll("_", " ") || "No snapshot"} · {readiness?.trend || ""}</span></p><p className="mt-1 text-xs text-text-faint">Last calculated: {date(readiness?.calculated_at)}</p></div></section></div>
+
+    <section className="card p-5"><p className="eyebrow">Recent scenarios and responses</p><div className="mt-4 space-y-3">{summary.responses.length ? [...summary.responses].reverse().map((item, i) => <article key={`${item.at}-${i}`} className="rounded-xl border border-white/[0.06] p-3"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">{item.scenario}</h3><span className="chip">{percent(item.score)} · {item.branch || item.decision || "evaluated"}</span></div><p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-text-muted">{item.response}</p><p className="mt-2 text-[10px] text-text-faint">{date(item.at)}</p></article>) : <p className="text-sm text-text-faint">No submitted scenario responses recorded.</p>}</div></section>
+    <section className="card p-5"><p className="eyebrow">Activity timeline</p><div className="mt-4 space-y-3">{events.length ? events.map((event, i) => <div key={`${event.timestamp}-${i}`} className="flex gap-3"><div className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-accent-cyan" /><div className="min-w-0"><p className="text-sm">{event.activity}{event.detail ? <span className="text-text-muted"> · {event.detail}</span> : ""}</p><p className="mt-0.5 text-xs text-text-faint">{date(event.timestamp)}{event.score != null ? ` · ${percent(event.score)}` : ""}{event.status ? ` · ${event.status}` : ""}</p></div></div>) : <p className="text-sm text-text-faint">No recorded activity.</p>}</div></section>
+    </div></div>;
+}
+
 export default function Admin() {
-  const [students, setStudents] = useState([]);
-  const [questions, setQuestions] = useState([]);
-  const [error, setError] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [competency, setCompetency] = useState("technical_knowledge");
-
-  const load = () => {
-    apiClient.get("/api/intelligence/admin/students").then((r) => setStudents(r.data.students || [])).catch((e) => setError(e.message));
-    apiClient.get("/api/admin/questions").then((r) => setQuestions(r.data.questions || [])).catch((e) => setError(e.message));
-  };
-
-  useEffect(() => { load(); }, []);
-
-  const addQuestion = async (event) => {
-    event.preventDefault();
-    setError("");
+  const [dashboard, setDashboard] = useState(emptyDashboard); const [analytics, setAnalytics] = useState(null); const [activity, setActivity] = useState([]);
+  const [students, setStudents] = useState([]); const [pagination, setPagination] = useState({ page: 1, page_size: 25, total: 0, pages: 0 }); const [activityLimit, setActivityLimit] = useState(12);
+  const [filters, setFilters] = useState({ q: "", baseline_status: "", internship_status: "", simulation_status: "", difficulty: "", activity_status: "", readiness_min: "", readiness_max: "", sort: "registration_date", order: "desc" });
+  const [selected, setSelected] = useState(null); const [error, setError] = useState(""); const [loading, setLoading] = useState(true);
+  const load = useCallback(async (page = 1) => {
+    setLoading(true); setError("");
     try {
-      await apiClient.post("/api/admin/questions", {
-        prompt,
-        competency,
-        question_type: "short_answer",
-        rubric_keywords: ["because", "risk", "test"],
-      });
-      setPrompt("");
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  };
+      const params = { ...filters, page, page_size: 25 };
+      Object.keys(params).forEach((key) => { if (params[key] === "") delete params[key]; });
+      const [overview, people, events, charts] = await Promise.all([
+        apiClient.get("/api/admin/dashboard"), apiClient.get("/api/admin/students", { params }),
+        apiClient.get("/api/admin/activity", { params: { limit: activityLimit } }), apiClient.get("/api/admin/analytics"),
+      ]);
+      setDashboard(overview.data); setStudents(people.data.students || []); setPagination(people.data.pagination); setActivity(events.data.events || []); setAnalytics(charts.data);
+    } catch (err) { setError(err.message); } finally { setLoading(false); }
+  }, [filters, activityLimit]);
+  useEffect(() => { const timer = setTimeout(() => load(1), 250); return () => clearTimeout(timer); }, [load]);
+  const updateFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+  const attention = dashboard.attention_students || [];
+  const filterClass = "input min-w-36";
 
-  const deactivate = async (id) => {
-    setError("");
-    try {
-      await apiClient.delete(`/api/admin/questions/${id}`);
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  };
+  return <main className="mx-auto max-w-[1500px] space-y-5 p-4 sm:p-6 lg:p-8">
+    <header className="card overflow-hidden p-6 sm:p-8"><div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-brand-500/15 to-transparent"/><div className="relative flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow">System monitoring · Admin</p><h1 className="mt-1 font-display text-3xl font-bold sm:text-4xl">Mission <span className="gradient-text">Control</span></h1><p className="mt-2 max-w-2xl text-sm text-text-muted">Observe each learner’s path from baseline evidence through adaptive internship simulations to readiness.</p></div><button className="btn-ghost" onClick={() => load(pagination.page)} disabled={loading}>{loading ? "Refreshing…" : "↻ Refresh data"}</button></div></header>
+    {error && <div className="rounded-xl border border-status-blocked/30 bg-status-blocked/10 p-3 text-sm text-status-blocked">{error}</div>}
+    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Metric label="Registered students" value={dashboard.total_students} hint="Registered student accounts"/><Metric label="Active students" value={dashboard.active_students} hint="Activity recorded within 30 days" accent="cyan"/><Metric label="Baseline completed" value={dashboard.baseline_completed} hint={`${dashboard.assessments_completed} completed attempts`} accent="green"/><Metric label="Simulations active" value={dashboard.simulations_in_progress} hint="Currently in progress" accent="amber"/><Metric label="Students completed simulations" value={dashboard.students_completed_simulations} hint={`${dashboard.simulations_completed} completed simulation records`} accent="green"/><Metric label="Average readiness" value={percent(dashboard.average_readiness)} hint="Latest recorded snapshot per student"/><Metric label="Average competency" value={percent(dashboard.average_competency)} hint="Assessed students with competency evidence" accent="cyan"/><Metric label="Feedback reports" value={dashboard.feedback_reports} hint="Generated by existing feedback service"/><Metric label="Assessments completed" value={dashboard.assessments_completed} hint="All completed attempts" accent="green"/><Metric label="Need attention" value={dashboard.students_needing_attention} hint="System generated indicators" accent="amber"/></section>
 
-  return (
-    <div className="mx-auto max-w-6xl space-y-5 p-6">
-      <div className="card overflow-hidden p-6">
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-brand-500/15 to-transparent" />
-        <div className="relative">
-          <p className="eyebrow">🛡 Administration</p>
-          <h1 className="mt-1 font-display text-2xl font-bold sm:text-3xl">Mission <span className="gradient-text">Control</span></h1>
-          <p className="mt-1 text-sm text-text-muted">Review student readiness and maintain the baseline assessment.</p>
-        </div>
-      </div>
-      {error && <div className="rounded-xl border border-status-blocked/30 bg-status-blocked/10 p-3 text-xs text-status-blocked">{error}</div>}
-      <div className="card overflow-hidden">
-        <div className="flex items-center justify-between border-b border-white/[0.06] bg-white/[0.02] px-4 py-3">
-          <h2 className="font-display text-sm font-semibold">Student fleet</h2>
-          <span className="chip font-mono text-[11px]!">{students.length} profiles</span>
-        </div>
-        <div className="overflow-x-auto">
-        <table className="table-premium w-full text-left text-sm">
-          <thead>
-            <tr className="border-b border-white/[0.06] bg-ink/40 text-[11px] uppercase tracking-wider text-text-faint">
-              <th className="p-3">Student</th><th className="p-3">Domain</th><th className="p-3">Role</th><th className="p-3">Avg</th><th className="p-3">Simulations</th><th className="p-3">Readiness</th>
-            </tr>
-          </thead>
-          <tbody>
-            {students.map((s) => (
-              <tr key={s.student_id} className="border-b border-white/[0.04] last:border-0">
-                <td className="p-3">
-                  <span className="flex items-center gap-2">
-                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500/60 to-accent-cyan/40 font-display text-xs font-bold text-white">
-                      {(s.full_name || s.student_id)?.[0]?.toUpperCase()}
-                    </span>
-                    <span className="font-mono text-xs">{s.full_name || s.student_id}</span>
-                  </span>
-                </td>
-                <td className="p-3 text-text-muted">{s.domain || "—"}</td>
-                <td className="p-3 text-text-muted">{s.role || "—"}</td>
-                <td className="p-3 font-mono">{s.average_score == null ? "—" : `${Math.round(s.average_score)}%`}</td>
-                <td className="p-3 font-mono">{s.simulations}</td>
-                <td className="p-3">
-                  {s.readiness ? (
-                    <span className="chip font-mono text-[11px]! text-status-completed! border-status-completed/30! bg-status-completed/10!">
-                      {Math.round(s.readiness.readiness_score)}%
-                    </span>
-                  ) : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        </div>
-        {students.length === 0 && <p className="p-6 text-center text-sm text-text-faint">No student profiles have been created yet.</p>}
-      </div>
-      <div className="card space-y-3 p-5">
-        <h2 className="font-display text-sm font-semibold">📚 Question bank</h2>
-        <form onSubmit={addQuestion} className="flex flex-wrap gap-2">
-          <input className="input min-w-64 flex-1" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="New short-answer prompt" required minLength={8} />
-          <input className="input w-52" value={competency} onChange={(e) => setCompetency(e.target.value)} />
-          <button className="btn-primary" type="submit">+ Add</button>
-        </form>
-        <ul className="space-y-2 text-sm">
-          {questions.filter((q) => q.active).map((q) => (
-            <li key={q.id} className="flex items-start justify-between gap-3 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-2.5 transition-colors hover:border-brand-400/25">
-              <span><span className="chip mr-2 font-mono text-[10px]!">{q.competency}</span><span className="text-text-muted">{q.prompt}</span></span>
-              <button type="button" className="btn-ghost shrink-0" onClick={() => deactivate(q.id)}>Retire</button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
+    <section className="grid gap-4 xl:grid-cols-3"><BarList title="Average competency scores" rows={analytics?.average_competencies} nameKey="competency" valueKey="score"/><BarList title="Readiness distribution" rows={analytics?.readiness_distribution} nameKey="level"/><BarList title="Students by difficulty" rows={analytics?.difficulty_distribution} nameKey="difficulty"/></section>
+    <section className="grid gap-4 xl:grid-cols-3"><BarList title="Baseline performance" rows={analytics?.baseline_performance} nameKey="range"/><BarList title="Simulation performance" rows={analytics?.simulation_performance} nameKey="range"/><BarList title="Adaptive branch distribution" rows={analytics?.adaptive_branch_distribution} nameKey="branch"/></section>
+
+    <section className="card p-5"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="eyebrow">System generated indicators</p><h2 className="mt-1 font-display text-lg font-semibold">Students needing attention</h2><p className="text-xs text-text-faint">Based on recorded readiness and workflow state; indicators do not represent a human judgment.</p></div><span className="chip">{dashboard.students_needing_attention} indicators</span></div>{attention.length ? <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{attention.map((s) => <button onClick={() => setSelected(s.student_id)} key={s.student_id} className="rounded-xl border border-status-progress/20 bg-status-progress/[0.05] p-3 text-left hover:border-status-progress/50"><p className="text-sm font-semibold">{s.name}</p><p className="mt-1 text-xs text-text-muted">{s.reasons?.join(" · ")}</p>{s.readiness_score != null && <p className="mt-1 font-mono text-xs text-text-faint">Readiness {percent(s.readiness_score)}</p>}</button>)}</div> : <p className="mt-4 text-sm text-text-faint">No current attention indicators.</p>}</section>
+
+    <section className="card overflow-hidden"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] p-5"><div><p className="eyebrow">Registered learner records</p><h2 className="mt-1 font-display text-lg font-semibold">Student monitoring</h2></div><span className="chip">{pagination.total} students</span></div>
+      <div className="grid gap-2 border-b border-white/[0.06] p-4 sm:grid-cols-2 lg:grid-cols-4"><input className={filterClass} placeholder="Search name or email" value={filters.q} onChange={(e) => updateFilter("q", e.target.value)}/><select className={filterClass} value={filters.baseline_status} onChange={(e) => updateFilter("baseline_status", e.target.value)}><option value="">Any baseline status</option><option value="completed">Completed</option><option value="not_started">Not started</option></select><select className={filterClass} value={filters.internship_status} onChange={(e) => updateFilter("internship_status", e.target.value)}><option value="">Any internship status</option><option value="active">Active</option><option value="completed">Completed</option><option value="not_started">Not started</option></select><select className={filterClass} value={filters.simulation_status} onChange={(e) => updateFilter("simulation_status", e.target.value)}><option value="">Any simulation status</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="not_started">Not started</option><option value="abandoned">Abandoned</option></select><select className={filterClass} value={filters.difficulty} onChange={(e) => updateFilter("difficulty", e.target.value)}><option value="">Any difficulty</option><option value="beginner">Beginner</option><option value="intermediate">Intermediate</option><option value="advanced">Advanced</option></select><select className={filterClass} value={filters.activity_status} onChange={(e) => updateFilter("activity_status", e.target.value)}><option value="">Any activity</option><option value="active">Active · 30 days</option><option value="inactive">Inactive · 30+ days</option></select><div className="flex gap-2"><input className={filterClass} type="number" min="0" max="100" placeholder="Readiness min" value={filters.readiness_min} onChange={(e) => updateFilter("readiness_min", e.target.value)}/><input className={filterClass} type="number" min="0" max="100" placeholder="Readiness max" value={filters.readiness_max} onChange={(e) => updateFilter("readiness_max", e.target.value)}/></div><div className="flex gap-2"><select className={filterClass} value={filters.sort} onChange={(e) => updateFilter("sort", e.target.value)}><option value="registration_date">Sort: registration</option><option value="name">Sort: name</option><option value="readiness">Sort: readiness</option><option value="baseline">Sort: baseline score</option><option value="last_activity">Sort: last activity</option></select><select aria-label="Sort direction" className="input w-28" value={filters.order} onChange={(e) => updateFilter("order", e.target.value)}><option value="desc">Descending</option><option value="asc">Ascending</option></select></div></div>
+      <div className="overflow-x-auto"><table className="table-premium w-full min-w-[1100px] text-left text-sm"><thead><tr className="border-b border-white/[0.06] bg-ink/40 text-[10px] uppercase tracking-wider text-text-faint">{["Student", "Registered", "Baseline", "Scores", "Difficulty", "Internship", "Simulation", "Attempts", "Last activity", "Status"].map((title) => <th className="p-3" key={title}>{title}</th>)}</tr></thead><tbody>{students.map((s) => <tr key={s.student_id} className="cursor-pointer border-b border-white/[0.04] last:border-0" onClick={() => setSelected(s.student_id)}><td className="p-3"><p className="font-medium">{s.name}</p><p className="text-xs text-text-faint">{s.email}</p></td><td className="p-3 text-xs text-text-muted">{date(s.registration_date)}</td><td className="p-3"><span className="chip">{s.baseline_status === "completed" ? percent(s.baseline_score) : "Not started"}</span></td><td className="p-3 font-mono text-xs">R {percent(s.readiness_score)}<br/><span className="text-text-faint">C {percent(s.competency_score)}</span></td><td className="p-3 capitalize text-text-muted">{s.recommended_difficulty || "—"}</td><td className="p-3 capitalize text-text-muted">{s.internship_status || "—"}</td><td className="p-3 capitalize text-text-muted">{s.simulation_status || "—"}</td><td className="p-3 font-mono">{s.simulation_count}</td><td className="p-3 text-xs text-text-muted">{date(s.last_activity)}</td><td className="p-3"><span className="chip">{s.overall_status}</span></td></tr>)}</tbody></table></div>
+      {!students.length && <p className="p-8 text-center text-sm text-text-faint">{loading ? "Loading student records…" : "No students match these filters."}</p>}
+      <div className="flex items-center justify-between border-t border-white/[0.06] p-4 text-xs text-text-muted"><span>Page {pagination.page} of {Math.max(1, pagination.pages)} · {pagination.total} students</span><div className="flex gap-2"><button className="btn-ghost" disabled={pagination.page <= 1 || loading} onClick={() => load(pagination.page - 1)}>Previous</button><button className="btn-ghost" disabled={pagination.page >= pagination.pages || loading} onClick={() => load(pagination.page + 1)}>Next</button></div></div>
+    </section>
+
+    <section className="card p-5"><div className="flex items-center justify-between"><div><p className="eyebrow">All students</p><h2 className="mt-1 font-display text-lg font-semibold">Recent system activity</h2></div><button className="btn-ghost" onClick={() => setActivityLimit((n) => n === 12 ? 100 : 12)}>{activityLimit === 12 ? "View all activity" : "Show recent"}</button></div><div className="mt-4 space-y-2">{activity.length ? activity.map((item, i) => <button key={`${item.timestamp}-${i}`} onClick={() => setSelected(item.student_id)} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl border border-white/[0.05] bg-white/[0.02] p-3 text-left hover:border-brand-400/30"><span><span className="font-medium">{item.student_name}</span><span className="ml-2 text-sm text-text-muted">{item.activity}</span>{item.detail && <span className="ml-2 text-xs text-text-faint">· {item.detail}</span>}</span><span className="font-mono text-xs text-text-faint">{item.score != null ? `${percent(item.score)} · ` : ""}{date(item.timestamp)}</span></button>) : <p className="text-sm text-text-faint">No recorded events yet.</p>}</div></section>
+    <AssessmentBank />
+    {selected && <StudentDetail studentId={selected} onClose={() => setSelected(null)} />}
+  </main>;
 }

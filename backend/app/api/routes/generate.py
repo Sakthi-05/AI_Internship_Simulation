@@ -7,19 +7,27 @@ and generates an entire internship simulation (company, manager,
 project, 4 sprints, and all their tasks with dependencies) in one
 atomic transaction.
 """
+import asyncio
 import logging
+import time
+import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
 from app.models.enums import CompanyType, DifficultyLevel, ScenarioStatus, SimulationStatus
+from app.models.company import Company
 from app.models.intelligence import StudentProfile
+from app.models.project import Project
 from app.models.project_state import ProjectState
 from app.models.simulation import Scenario, ScenarioTask, Simulation
+from app.models.sprint import Sprint
+from app.models.task import Task
 from app.schemas.generation import GenerationRequest, GenerationResponse
 from app.services.ai.ai_service import AIService, MockAIService, get_ai_service
 
@@ -32,6 +40,7 @@ from app.services.engines.task_engine import generate_tasks_for_project
 from app.services.generators.team_generator import generate_team_members
 
 router = APIRouter(prefix="/api/generate", tags=["Generation"])
+GENERATION_AI_TIMEOUT_SECONDS = 8.0
 
 
 @router.post("", response_model=GenerationResponse, status_code=status.HTTP_201_CREATED)
@@ -47,43 +56,74 @@ async def generate_internship_simulation(
             detail="student_id in request body must match the authenticated token subject",
         )
 
+    started_at = time.monotonic()
+    logger.info("Internship generation received student_id=%s request_id=%s",
+                user.student_id, payload.generation_request_id)
+    if payload.generation_request_id is not None:
+        existing = db.execute(select(Simulation).where(
+            Simulation.student_id == user.student_id,
+            Simulation.generation_request_id == payload.generation_request_id,
+        )).scalar_one_or_none()
+        if existing is not None:
+            logger.info("Returning existing generation request student_id=%s request_id=%s simulation_id=%s",
+                        user.student_id, payload.generation_request_id, existing.id)
+            return _generation_response(db, existing)
+
     role, technology_stack, difficulty, company_type, focus, scores = _resolve_generation_inputs(db, payload)
 
     try:
-        bundle = await _build_internship(
+        bundle = await asyncio.wait_for(_build_internship(
             db,
-            student_id=payload.student_id,
+            student_id=user.student_id,
             role=role,
             technology_stack=technology_stack,
             difficulty=difficulty,
             company_type=company_type,
             focus=focus,
             scores=scores,
+            generation_request_id=payload.generation_request_id,
             ai_service=ai_service,
-        )
-    except httpx.HTTPError as exc:
+        ), timeout=GENERATION_AI_TIMEOUT_SECONDS)
+    except (httpx.HTTPError, TimeoutError) as exc:
         # Gemini failed or is unreachable (503, timeout, connection error…).
         # The whole transaction is rolled back, then generation is retried
         # with the deterministic local fallback — the student still gets a
         # complete, working internship simulation (only the AI flavor text
         # differs). Anything else keeps propagating exactly as before.
         db.rollback()
-        logger.warning("Gemini unavailable during /api/generate (%s); using local fallback", exc)
+        logger.warning("Generation AI flavor unavailable (%s); using local fallback", type(exc).__name__)
         try:
             bundle = await _build_internship(
                 db,
-                student_id=payload.student_id,
+                student_id=user.student_id,
                 role=role,
                 technology_stack=technology_stack,
                 difficulty=difficulty,
                 company_type=company_type,
                 focus=focus,
                 scores=scores,
+                generation_request_id=payload.generation_request_id,
                 ai_service=MockAIService(),
             )
+        except IntegrityError:
+            db.rollback()
+            existing = _find_generation_request(db, user.student_id, payload.generation_request_id)
+            if existing is None:
+                raise
+            logger.info("Concurrent generation request deduplicated student_id=%s request_id=%s simulation_id=%s",
+                        user.student_id, payload.generation_request_id, existing.id)
+            return _generation_response(db, existing)
         except Exception:
             db.rollback()
             raise
+    except IntegrityError:
+        db.rollback()
+        existing = _find_generation_request(db, user.student_id, payload.generation_request_id)
+        if existing is None:
+            raise
+        logger.info("Concurrent generation request deduplicated student_id=%s request_id=%s simulation_id=%s",
+                    user.student_id, payload.generation_request_id, existing.id)
+        return _generation_response(db, existing)
     except Exception:
         db.rollback()
         raise
@@ -93,7 +133,7 @@ async def generate_internship_simulation(
     simulation = bundle["simulation"]
     sprints = bundle["sprints"]
 
-    return GenerationResponse(
+    response = GenerationResponse(
         company_id=company.id,
         project_id=project.id,
         simulation_id=simulation.id,
@@ -107,6 +147,35 @@ async def generate_internship_simulation(
         company_type=company_type,
         focus_competencies=focus,
     )
+    logger.info("Internship generation completed student_id=%s simulation_id=%s elapsed_ms=%d",
+                user.student_id, simulation.id, int((time.monotonic() - started_at) * 1000))
+    return response
+
+
+def _find_generation_request(db, student_id: str, request_id: uuid.UUID | None):
+    if request_id is None:
+        return None
+    return db.execute(select(Simulation).where(
+        Simulation.student_id == student_id,
+        Simulation.generation_request_id == request_id,
+    )).scalar_one_or_none()
+
+
+def _generation_response(db, simulation: Simulation) -> GenerationResponse:
+    company = db.get(Company, simulation.company_id)
+    project = db.get(Project, simulation.project_id)
+    sprints = db.execute(select(Sprint).where(Sprint.project_id == project.id)
+                         .order_by(Sprint.sprint_number)).scalars().all()
+    task_count = db.execute(select(func.count()).select_from(Task)
+                            .join(Sprint).where(Sprint.project_id == project.id)).scalar_one()
+    profile = db.execute(select(StudentProfile).where(StudentProfile.student_id == simulation.student_id)).scalar_one_or_none()
+    focus = ((profile.recommended_parameters or {}).get("focus_competencies") or []) if profile else []
+    return GenerationResponse(company_id=company.id, project_id=project.id, simulation_id=simulation.id,
+                              title=simulation.title, description=simulation.description,
+                              sprint_ids=[s.id for s in sprints], task_count=task_count,
+                              duration_weeks=simulation.duration_weeks, difficulty=simulation.difficulty,
+                              role=simulation.role, company_type=company.company_type,
+                              focus_competencies=focus)
 
 
 async def _build_internship(
@@ -119,6 +188,7 @@ async def _build_internship(
     company_type,
     focus,
     scores,
+    generation_request_id,
     ai_service,
 ):
     """Build the full internship simulation in one atomic transaction.
@@ -136,6 +206,7 @@ async def _build_internship(
         ai_service=ai_service,
         technology_stack=technology_stack,
     )
+    logger.info("Generation stage complete stage=company student_id=%s", student_id)
 
     project = generate_project(
         db=db,
@@ -144,8 +215,10 @@ async def _build_internship(
         technology_stack=technology_stack,
         difficulty=difficulty,
     )
+    logger.info("Generation stage complete stage=project student_id=%s", student_id)
 
     sprints = generate_sprints_and_tasks(db=db, project=project)
+    logger.info("Generation stage complete stage=sprints student_id=%s sprint_count=%d", student_id, len(sprints))
 
     tasks = generate_tasks_for_project(
         db=db,
@@ -157,11 +230,13 @@ async def _build_internship(
         focus_competencies=focus,
         competency_scores=scores,
     )
+    logger.info("Generation stage complete stage=tasks student_id=%s task_count=%d", student_id, len(tasks))
 
     team_members = generate_team_members(db=db, company_id=company.id)
     generate_meetings_for_sprints(
         db=db, project_id=project.id, sprints=sprints, manager=manager, team_members=team_members
     )
+    logger.info("Generation stage complete stage=team_meetings student_id=%s", student_id)
 
     # Ensure a project state exists and reflects the initial sprint context.
     state = db.execute(select(ProjectState).where(ProjectState.project_id == project.id)).scalar_one_or_none()
@@ -176,6 +251,7 @@ async def _build_internship(
 
     simulation = Simulation(
         student_id=student_id,
+        generation_request_id=generation_request_id,
         company_id=company.id,
         project_id=project.id,
         title=f"{project.title} Internship",
