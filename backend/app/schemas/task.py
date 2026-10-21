@@ -25,6 +25,13 @@ class TaskRead(BaseModel):
     blocked_reason: Optional[str] = None
     deliverable_url: Optional[str] = None
     depends_on_task_ids: List[uuid.UUID] = []
+    task_metadata: Optional[dict] = None
+    # Enhanced fields for dynamic workflow
+    hints: List[str] = []
+    recommended_team_role: Optional[str] = None
+    generation_reason: Optional[str] = None
+    performance_trend_at_generation: Optional[str] = None
+    dependency_details: List[dict] = []
 
 
 class TaskStatusUpdate(BaseModel):

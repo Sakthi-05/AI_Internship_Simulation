@@ -222,8 +222,8 @@ def test_metadata_response_is_analyzed_not_ignored(client, auth_headers):
     assert "No work evidence submitted" not in recorder.prompts[0]
 
 
-def test_slow_provider_uses_fallback_and_repeated_review_is_idempotent(client, auth_headers, monkeypatch):
-    """A slow provider cannot keep task/current locked past the browser timeout."""
+def test_slow_provider_fails_without_fabricating_review_and_retry_is_safe(client, auth_headers, monkeypatch):
+    """A provider timeout is persisted as failed and never becomes a mock score."""
     import asyncio
     from sqlalchemy import create_engine as _ce
 
@@ -250,22 +250,20 @@ def test_slow_provider_uses_fallback_and_repeated_review_is_idempotent(client, a
             f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
             headers=auth_headers,
         )
-        assert reviewed.status_code == 201, reviewed.text
+        assert reviewed.status_code == 503, reviewed.text
         status_response = client.get(
             f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
             headers=auth_headers,
         )
         assert status_response.status_code == 200, status_response.text
-        assert status_response.json()["status"] == "completed"
-        assert status_response.json()["score"] is not None
-        assert status_response.json()["raw"]["evaluation_source"] == "mock_fallback_after_provider_error"
+        assert status_response.json()["status"] == "failed"
+        assert status_response.json()["score"] is None
 
         repeated = client.post(
             f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
             headers=auth_headers,
         )
-        assert repeated.status_code == 201, repeated.text
-        assert repeated.json()["review_id"] == reviewed.json()["review_id"]
+        assert repeated.status_code == 503, repeated.text
     finally:
         app.dependency_overrides.pop(get_ai_service, None)
 
@@ -276,6 +274,40 @@ def test_slow_provider_uses_fallback_and_repeated_review_is_idempotent(client, a
             {"version_id": version_id},
         ).scalar_one()
     assert count == 1
+
+
+def test_malformed_provider_output_is_a_failed_retryable_review(client, auth_headers):
+    class _MalformedReviewer(AIService):
+        provider_name = "test_provider"
+
+        async def generate_text(self, prompt, system_prompt=None):
+            return "review"
+
+        async def generate_json(self, prompt, system_prompt=None):
+            return {"result": "approved", "score": 100}
+
+    data, sim_id, task_id = _start_task(client, auth_headers)
+    version_id = _submit_task_version(
+        client, auth_headers, sim_id, task_id,
+        metadata='{"response":"Implemented a real request parser with input validation, error handling, tests, and a detailed explanation of each required behavior."}',
+    )
+    app.dependency_overrides[get_ai_service] = lambda: _MalformedReviewer()
+    try:
+        response = client.post(
+            f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
+            headers=auth_headers,
+        )
+        status_response = client.get(
+            f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
+            headers=auth_headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_ai_service, None)
+
+    assert response.status_code == 503, response.text
+    assert status_response.json()["status"] == "failed"
+    assert status_response.json()["score"] is None
+    assert status_response.json()["result"] is None
 
 
 def test_empty_submission_gets_missing_evidence_review(client, auth_headers):
@@ -451,11 +483,11 @@ def test_ai_failure_uses_deterministic_review_and_resolves_state(client, auth_he
         rows = db.execute(
             _select(AIReview).where(AIReview.version_id == version_id)
         ).scalars().all()
-        assert len(rows) == 1, "deterministic fallback review should be persisted"
+        assert len(rows) == 1, "failed provider review should be persisted for retry"
         version = db.get(SubmissionVersion, version_id)
-        assert version.status.value == "changes_requested"
+        assert version.status.value == "under_review"
         task = db.get(Task, version.submission.task_id)
-        assert task.status.value == "changes_requested"
+        assert task.status.value == "under_review"
     finally:
         db.close()
 
@@ -503,35 +535,49 @@ def test_current_task_refresh_is_read_only_for_stuck_review(client, auth_headers
         )
     finally:
         app.dependency_overrides.pop(get_ai_service, None)
-    assert reviewed.status_code == 201, reviewed.text
-    assert reviewed.json()["result"] == "changes_required"
-    assert reviewed.json()["raw"]["evaluation_source"] == "mock_fallback_after_provider_error"
-    assert reviewed.json()["score"] is not None
+    assert reviewed.status_code == 503, reviewed.text
     current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers)
     assert current.status_code == 200, current.text
-    assert current.json()["status"] == "changes_requested", current.json()
-    assert current.json()["review_feedback"] is not None
+    assert current.json()["status"] == "under_review", current.json()
+    assert current.json()["review_status"] == "failed", current.json()
+    assert current.json()["review_feedback"] is None
 
 
 @pytest.mark.asyncio
 async def test_review_runs_once_per_version(client, auth_headers):
-    """A duplicate review call returns the saved review without re-running AI."""
+    """A valid provider review is preserved and a duplicate is idempotent."""
     from sqlalchemy import select as _select
 
     from app.core.database import SessionLocal
     from app.models.submission import AIReview, SubmissionVersion
-    from app.services.ai.ai_service import MockAIService
+    from app.services.ai.ai_service import AIService
     from app.services.ai.review_service import ReviewService
+
+    class _ValidReviewer(AIService):
+        provider_name = "test_provider"
+
+        async def generate_text(self, prompt, system_prompt=None):
+            return "review"
+
+        async def generate_json(self, prompt, system_prompt=None):
+            payload = dict(CHANGES_PAYLOAD)
+            payload["acceptance_criteria"] = [
+                {"criterion": str(criterion), "met": False, "evidence": "Not implemented in submitted code."}
+                for criterion in (version.submission.task.acceptance_criteria or [])
+            ]
+            return payload
 
     data, sim_id, task_id = _start_task(client, auth_headers)
     version_id = _submit_task_version(client, auth_headers, sim_id, task_id)
     db = SessionLocal()
     try:
         version = db.get(SubmissionVersion, version_id)
-        service = ReviewService(MockAIService())
+        service = ReviewService(_ValidReviewer())
         first = await service.review_submission_version(db, version)
         second = await service.review_submission_version(db, version)
         assert first["review_id"] == second["review_id"]
+        assert first["raw"]["evaluation_source"] == "test_provider"
+        assert first["score"] == CHANGES_PAYLOAD["score"]
         rows = db.execute(
             _select(AIReview).where(AIReview.version_id == version.id)
         ).scalars().all()

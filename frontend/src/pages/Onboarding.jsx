@@ -107,6 +107,7 @@ export default function Onboarding() {
   const [catalog, setCatalog] = useState([]);
   const [selectedSkills, setSelectedSkills] = useState({});
   const [attempt, setAttempt] = useState(null);
+  const [assessmentEvaluation, setAssessmentEvaluation] = useState(null);
   const [answers, setAnswers] = useState({});
   const [formError, setFormError] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -122,6 +123,7 @@ export default function Onboarding() {
     if (!auth?.token || !auth?.studentId) {
       setProfile(null);
       setAttempt(null);
+      setAssessmentEvaluation(null);
       setAnswers({});
       setSelectedSkills({});
       setFullName("");
@@ -140,6 +142,13 @@ export default function Onboarding() {
       if (cancelled) return;
       const data = res.data;
       setProfile(data);
+      if (data.assessed) {
+        apiClient.get("/api/assessments/latest").then((result) => {
+          if (!cancelled) setAssessmentEvaluation(result.data?.result?.evaluation || null);
+        }).catch(() => {});
+      } else {
+        setAssessmentEvaluation(null);
+      }
       setFullName(data.full_name || auth.fullName || "");
       setCollege(data.college || "");
       setDegree(data.degree || "");
@@ -189,6 +198,7 @@ export default function Onboarding() {
     else clearSimulation();
     setProfile(null);
     setAttempt(null);
+    setAssessmentEvaluation(null);
     setAnswers({});
     setSelectedSkills({});
     setFormError(null);
@@ -299,6 +309,7 @@ export default function Onboarding() {
     setBusy(true);
     try {
       const submitRes = await apiClient.post(`/api/assessments/${attempt.id}/submit`, { answers: payload });
+      setAssessmentEvaluation(submitRes.data?.evaluation || null);
       // The submit response already carries the scored profile, so a
       // transient failure on the refresh below must not hide the results.
       // Merge over the current profile to keep view-only keys (assessed,
@@ -321,6 +332,8 @@ export default function Onboarding() {
           const res = await apiClient.get("/api/students/me");
           if (res.data?.assessed) {
             setProfile(res.data);
+            const latest = await apiClient.get("/api/assessments/latest");
+            setAssessmentEvaluation(latest.data?.result?.evaluation || null);
             setAttempt(null);
             setNotice(AI_UNAVAILABLE_MESSAGE);
             return;
@@ -680,6 +693,28 @@ export default function Onboarding() {
                   <p className="eyebrow">Baseline complete</p>
                 </div>
                 <p className="mt-3 text-[15px] leading-relaxed text-text">{profile.assessment_summary}</p>
+                {typeof assessmentEvaluation?.overall_score === "number" && (
+                  <p className="mt-2 font-mono text-sm text-status-completed">
+                    Overall score: {assessmentEvaluation.overall_score.toFixed(2)}/100
+                  </p>
+                )}
+                {assessmentEvaluation?.answers?.length > 0 && (
+                  <div className="mt-5 space-y-3">
+                    <p className="eyebrow">Answer feedback</p>
+                    {assessmentEvaluation.answers.map((answer) => (
+                      <article key={answer.question_id} className="rounded-xl border border-white/[0.06] bg-ink/40 p-3.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs font-semibold uppercase tracking-wider text-text-faint">{answer.competency?.replaceAll("_", " ") || "Technical"}</p>
+                          <span className="chip font-mono">{Math.round(answer.score)}/100</span>
+                        </div>
+                        <p className="mt-2 text-sm text-text">{answer.question}</p>
+                        <p className="mt-2 text-xs text-text-muted"><span className="font-semibold text-text">Your answer:</span> {answer.response}</p>
+                        <p className="mt-2 text-xs text-text-muted">{answer.explanation}</p>
+                        <p className="mt-1 text-xs text-text-muted">{answer.feedback}</p>
+                      </article>
+                    ))}
+                  </div>
+                )}
                 <div className="mt-4 grid gap-2 sm:grid-cols-2">
                   <div className="rounded-xl border border-status-completed/20 bg-status-completed/[0.06] px-3.5 py-2.5">
                     <p className="text-[11px] font-semibold uppercase tracking-wider text-status-completed">Strengths</p>
@@ -687,9 +722,15 @@ export default function Onboarding() {
                   </div>
                   <div className="rounded-xl border border-status-progress/20 bg-status-progress/[0.06] px-3.5 py-2.5">
                     <p className="text-[11px] font-semibold uppercase tracking-wider text-status-progress">Focus areas</p>
-                    <p className="mt-0.5 text-xs text-text-muted">{(profile.weaknesses || []).join(", ") || "—"}</p>
+                    <p className="mt-0.5 text-xs text-text-muted">{(profile.weaknesses || []).join(", ") || "No evidenced focus areas yet"}</p>
                   </div>
                 </div>
+                {(profile.baseline_unassessed_competencies || []).length > 0 && (
+                  <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-text-faint">Not assessed at baseline</p>
+                    <p className="mt-0.5 text-xs text-text-muted">{profile.baseline_unassessed_competencies.map((key) => key.replaceAll("_", " ")).join(", ")}</p>
+                  </div>
+                )}
               </div>
             </div>
             <div className="card space-y-2.5 p-6 text-sm">

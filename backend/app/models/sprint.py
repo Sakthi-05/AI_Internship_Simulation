@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, text
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -22,6 +22,9 @@ class Sprint(Base, UUIDPKMixin, TimestampMixin):
     goal: Mapped[str] = mapped_column(String(500), nullable=False)
     status: Mapped[SprintStatus] = mapped_column(
         Enum(SprintStatus, name="sprint_status_enum"), nullable=False, default=SprintStatus.PLANNED
+    )
+    sprint_metadata: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=dict, server_default=text("'{}'::jsonb")
     )
 
     start_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

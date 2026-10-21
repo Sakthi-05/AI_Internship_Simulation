@@ -89,20 +89,27 @@ def _proactive_count(company_id):
         db.close()
 
 
-def test_manager_thread_seeds_proactive_message_on_first_open(client, auth_headers):
+def _deadline_notification_count(company_id):
+    from app.core.database import SessionLocal
+    from app.models.enums import NotificationType
+    from app.models.notification import Notification
+    from sqlalchemy import select, func
+
+    db = SessionLocal()
+    try:
+        return db.scalar(select(func.count(Notification.id)).where(
+            Notification.company_id == company_id,
+            Notification.notification_type == NotificationType.DEADLINE_UPDATED,
+        ))
+    finally:
+        db.close()
+
+
+def test_opening_manager_thread_does_not_create_unsolicited_message(client, auth_headers):
     data = _generate(client, auth_headers)
     history = _manager_history(client, auth_headers, data["company_id"])
 
-    assert len(history) >= 1
-    first = history[0]
-    assert first["sender_type"] == "manager"
-    assert len(first["content"]) > 0
-    # Grounded in this student's workplace: company, project, or first task.
-    blob = first["content"]
-    company = client.get(f"/api/companies/{data['company_id']}", headers=auth_headers).json()
-    project = client.get(f"/api/projects/{data['project_id']}", headers=auth_headers).json()
-    assert (company["name"] in blob) or (project["title"] in blob)
-    assert "your current task" not in blob  # fallback text must never leak
+    assert history == []
 
 
 def test_seeded_message_persists_and_cooldown_blocks_reseed(client, auth_headers):
@@ -132,10 +139,10 @@ def test_force_bypasses_cooldown(client, auth_headers):
         db.close()
 
     history = _manager_history(client, auth_headers, data["company_id"])
-    assert len(history) >= 2
+    assert len(history) == 1
 
 
-def test_teammate_thread_seeds_message_from_that_teammate(client, auth_headers):
+def test_opening_teammate_thread_does_not_create_unsolicited_message(client, auth_headers):
     data = _generate(client, auth_headers)
     company_id = data["company_id"]
     teammate_id = client.get(f"/api/companies/{company_id}/team", headers=auth_headers).json()[0]["id"]
@@ -144,10 +151,7 @@ def test_teammate_thread_seeds_message_from_that_teammate(client, auth_headers):
     assert resp.status_code == 200, resp.text
     history = resp.json()
 
-    mate_msgs = [m for m in history if m["sender_type"] == "team_member"]
-    assert len(mate_msgs) >= 1
-    assert mate_msgs[0]["sender_id"] == teammate_id
-    assert len(mate_msgs[0]["content"]) > 0
+    assert not [m for m in history if m["sender_type"] == "team_member"]
 
 
 def test_reminder_names_the_overdue_task(client, auth_headers):
@@ -261,44 +265,38 @@ def test_trigger_gap_blocks_rapid_reaction_but_force_sends(client, auth_headers)
     db = SessionLocal()
     try:
         first = proactive.maybe_send_proactive_message(
-            db, data["company_id"], channel="team_member", trigger="task_started"
+            db, data["company_id"], channel="team_member", trigger="task_started", event_id="task_started:one"
         )
         assert first is not None
         # Seconds later, another trigger must NOT produce a rapid follow-up.
         assert proactive.maybe_send_proactive_message(
-            db, data["company_id"], channel="manager", trigger="task_submitted"
+            db, data["company_id"], channel="manager", trigger="task_submitted", event_id="task_submitted:two"
         ) is None
         # Force still goes through (tests, admin resends).
         assert proactive.maybe_send_proactive_message(
-            db, data["company_id"], channel="manager", trigger="task_submitted", force=True
+            db, data["company_id"], channel="manager", trigger="task_submitted", force=True, event_id="task_submitted:three"
         ) is not None
     finally:
         db.close()
 
 
-def test_greeting_goes_out_once_then_instructions(client, auth_headers):
-    from app.core.database import SessionLocal
-
+def test_simulation_start_message_is_event_deduplicated(client, auth_headers):
     data = _generate(client, auth_headers)
-    history = _manager_history(client, auth_headers, data["company_id"])
-    assert history[0]["sender_type"] == "manager"
-
+    sim_id = data["simulation_id"]
+    assert client.post(f"/api/simulations/{sim_id}/start", headers=auth_headers).status_code == 200
+    first = _manager_history(client, auth_headers, data["company_id"])
+    assert first and first[0]["sender_type"] == "manager"
+    from app.core.database import SessionLocal
     db = SessionLocal()
     try:
-        # A repeat greeting trigger degrades to task instructions instead.
-        _age_proactive_messages(data["company_id"], minutes=10)
-        msg = proactive.maybe_send_proactive_message(
-            db, data["company_id"], channel="manager", trigger="simulation_started"
-        )
-        assert msg is not None
-        entry = db.execute(
-            text("SELECT action FROM activity_logs WHERE company_id = :id "
-                 "ORDER BY created_at DESC LIMIT 1"),
-            {"id": data["company_id"]},
-        ).fetchone()
-        assert entry is not None and entry[0] == "chat:proactive:task_update"
+        assert proactive.maybe_send_proactive_message(
+            db, data["company_id"], channel="manager", trigger="simulation_started",
+            event_id=f"simulation_started:{sim_id}",
+        ) is None
     finally:
         db.close()
+    second = _manager_history(client, auth_headers, data["company_id"])
+    assert [message["id"] for message in second] == [message["id"] for message in first]
 
 
 def test_followup_gated_until_task_has_aged(client, auth_headers):
@@ -396,16 +394,20 @@ def test_other_student_cannot_read_or_seed_chat(client, auth_headers, other_auth
 
 
 @pytest.mark.asyncio
-async def test_scheduler_sweep_sends_to_active_company(client, auth_headers):
+async def test_idle_scheduler_sweep_sends_no_workplace_message(client, auth_headers):
     data = _generate(client, auth_headers)
+    from app.services.scheduler_jobs import check_high_stress_projects, send_proactive_workplace_messages
     sim_id = data["simulation_id"]
     assert client.post(f"/api/simulations/{sim_id}/start", headers=auth_headers).status_code == 200
-    # Age well past every pacing window so the sweep deterministically picks
-    # this company up (the stagger only ever *defers*, never skips, recent ones).
+    # Passing pacing windows alone is not a workplace event.
     _age_proactive_messages(data["company_id"], minutes=25)
 
-    sent = await proactive.sweep_proactive_messages()
-    assert sent >= 1
+    before_messages = _proactive_count(data["company_id"])
+    before_notifications = _deadline_notification_count(data["company_id"])
+    await send_proactive_workplace_messages()
+    await check_high_stress_projects()
+    assert _proactive_count(data["company_id"]) == before_messages
+    assert _deadline_notification_count(data["company_id"]) == before_notifications
 
     history = _manager_history(client, auth_headers, data["company_id"])
     team_first = client.get(
@@ -413,4 +415,48 @@ async def test_scheduler_sweep_sends_to_active_company(client, auth_headers):
         + client.get(f"/api/companies/{data['company_id']}/team", headers=auth_headers).json()[0]["id"],
         headers=auth_headers,
     ).json()
-    assert len(history) + len(team_first) >= 1
+    assert len(history) + len(team_first) == 1  # only the explicit simulation-start event
+
+
+@pytest.mark.asyncio
+async def test_scheduler_sends_one_contextual_intervention_for_real_missed_deadline(client, auth_headers):
+    data = _generate(client, auth_headers)
+    sim_id = data["simulation_id"]
+    assert client.post(f"/api/simulations/{sim_id}/start", headers=auth_headers).status_code == 200
+    current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers).json()
+    task_id = current["task_id"]
+    assert client.post(f"/api/simulations/{sim_id}/tasks/{task_id}/start", headers=auth_headers).status_code == 200
+    _backdate_task_deadline(task_id)
+    _age_proactive_messages(data["company_id"], minutes=10)
+
+    before_messages = _proactive_count(data["company_id"])
+    before_notifications = _deadline_notification_count(data["company_id"])
+    assert await proactive.sweep_proactive_messages() == 1
+    assert await proactive.sweep_proactive_messages() == 0
+    assert _proactive_count(data["company_id"]) == before_messages + 1
+    assert _deadline_notification_count(data["company_id"]) == before_notifications + 1
+    history = _manager_history(client, auth_headers, data["company_id"])
+    assert current["title"] in history[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_high_stress_notification_is_once_per_real_stress_episode(client, auth_headers):
+    from app.core.database import SessionLocal
+    from app.models.project_state import ProjectState
+    from app.models.project import Project
+    from sqlalchemy import select
+    from app.services.scheduler_jobs import check_high_stress_projects
+
+    data = _generate(client, auth_headers)
+    db = SessionLocal()
+    try:
+        project = db.get(Project, data["project_id"])
+        state = db.execute(select(ProjectState).where(ProjectState.project_id == project.id)).scalar_one()
+        state.stress_level = 90
+        db.commit()
+    finally:
+        db.close()
+    before = _deadline_notification_count(data["company_id"])
+    await check_high_stress_projects()
+    await check_high_stress_projects()
+    assert _deadline_notification_count(data["company_id"]) == before + 1

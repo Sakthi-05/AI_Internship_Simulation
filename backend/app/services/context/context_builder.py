@@ -168,7 +168,11 @@ def metadata_evidence_text(metadata: Any) -> str:
         for key in _METADATA_EVIDENCE_KEYS:
             value = metadata.get(key)
             if isinstance(value, str) and value.strip():
-                parts.append(f"{key.upper()}:\n{value.strip()[:2000]}")
+                # Architecture/design submissions can be long prose documents
+                # stored in the `code` field. Preserve substantially more than
+                # a short-answer budget so requirements later in the spec reach
+                # the evaluator intact.
+                parts.append(f"{key.upper()}:\n{value.strip()[:12000]}")
     return "\n\n".join(parts)
 
 
@@ -178,7 +182,6 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
     project = task.sprint.project
     from app.services.content_extraction import extract_all_submission_files
     from app.services.file_storage import FileStorageService
-    from app.models.submission import AIReview
 
     storage_service = FileStorageService()
     file_content = ""
@@ -187,7 +190,13 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
             file_content = extract_all_submission_files(version.files, storage_service) or ""
         except Exception:
             file_content = ""
-    meta_text = metadata_evidence_text(version.version_metadata)
+    metadata = version.version_metadata or {}
+    meta_text = metadata_evidence_text(metadata)
+    test_results = "\n".join(
+        f"{key}: {metadata[key]}"
+        for key in ("test_results", "test_output", "tests_run", "verification")
+        if metadata.get(key) not in (None, "", [], {})
+    )[:2000]
     file_chars = len(file_content.strip())
     meta_chars = len(meta_text.strip())
     attached_filenames = [
@@ -208,31 +217,18 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
     combined = "\n\n".join(part for part in (file_content.strip(), meta_text) if part)
     has_work_evidence = evidence_level in ("full", "thin")
     current_content = combined if combined else "No work evidence submitted."
-    if len(current_content) > 3500:
-        current_content = current_content[:3500] + "\n[truncated]"
-
-    previous_review = ""
-    prior = db.execute(
-        select(AIReview)
-        .join(SubmissionVersion, SubmissionVersion.id == AIReview.version_id)
-        .where(
-            SubmissionVersion.submission_id == version.submission_id,
-            SubmissionVersion.id != version.id,
-        )
-        .order_by(AIReview.created_at.desc())
-    ).scalars().first()
-    if prior and prior.summary:
-        previous_review = prior.summary[:300]
+    if len(current_content) > 12000:
+        current_content = current_content[:12000] + "\n[truncated]"
 
     return {
         "task_title": task.title,
         "task_description": (task.description or "")[:500],
         "acceptance_criteria": list(task.acceptance_criteria or [])[:8],
         "technology_stack": list(project.technology_stack or [])[:6],
-        "previous_review": previous_review,
         "has_work_evidence": has_work_evidence,
         "evidence_level": evidence_level,
         "attached_filenames": attached_filenames,
+        "test_results": test_results,
         "current_submission": {
             "version_number": version.version_number,
             "content": current_content,

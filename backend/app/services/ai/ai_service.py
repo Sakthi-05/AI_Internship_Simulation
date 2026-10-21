@@ -20,6 +20,8 @@ import hashlib
 import json
 import logging
 import random
+import re
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +35,118 @@ _GEMINI_AI_SERVICE: Optional["GeminiAIService"] = None
 _JSON_CACHE: Dict[str, Dict[str, Any]] = {}
 _JSON_CACHE_LIMIT = 64
 logger = logging.getLogger(__name__)
+
+
+class MalformedAIJSONError(ValueError):
+    """Provider returned text that could not be decoded as JSON after repair."""
+
+
+class AIProviderResponseError(RuntimeError):
+    """Provider request succeeded but returned no usable candidate."""
+
+
+def parse_json_response(raw: str) -> Any:
+    """Parse a JSON object/array with optional fences or surrounding prose."""
+    text = str(raw or "").strip()
+    if not text:
+        raise MalformedAIJSONError("empty provider response")
+    # Prefer an explicitly fenced JSON block when present.
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    candidates = [fenced.group(1)] if fenced else []
+    candidates.append(text)
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        for index, char in enumerate(candidate):
+            if char not in "{[":
+                continue
+            try:
+                value, _end = decoder.raw_decode(candidate[index:])
+                return value
+            except json.JSONDecodeError:
+                continue
+    raise MalformedAIJSONError("no complete JSON object or array found")
+
+
+def is_json_response_cacheable(system_prompt: Optional[str]) -> bool:
+    prompt = (system_prompt or "").lower()
+    return "baseline assessment" not in prompt and "senior engineering reviewer" not in prompt
+
+
+def _redacted_response_debug(value: Any) -> Any:
+    """Keep response shape/types and fingerprints while omitting all text values."""
+    if isinstance(value, dict):
+        return {str(key): _redacted_response_debug(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redacted_response_debug(item) for item in value]
+    if isinstance(value, str):
+        return {
+            "redacted_string": True,
+            "length": len(value),
+            "sha256": hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest(),
+        }
+    return value
+
+
+def _log_provider_json_response(model: str, raw: str, parsed: Any = None, error: Optional[str] = None) -> None:
+    # Never log prompt/request bodies, keys, or raw string values. This record
+    # captures response structure, string lengths/fingerprints, and parse error.
+    logger.debug(
+        "Gemini JSON response model=%s raw_chars=%d raw_sha256=%s parsed_redacted=%s parse_error=%s",
+        model,
+        len(raw),
+        hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest(),
+        json.dumps(_redacted_response_debug(parsed), ensure_ascii=True) if parsed is not None else None,
+        error,
+    )
+
+
+AI_REVIEW_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "result": {"type": "STRING", "enum": ["approved", "changes_required", "rejected"]},
+        "score": {"type": "INTEGER", "minimum": 0, "maximum": 100},
+        "severity": {"type": "STRING", "enum": ["info", "warning", "error", "critical"]},
+        "summary": {"type": "STRING"},
+        "strengths": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "issues": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "required_changes": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "acceptance_criteria": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "criterion": {"type": "STRING"},
+                    "met": {"type": "BOOLEAN"},
+                    "evidence": {"type": "STRING"},
+                },
+                "required": ["criterion", "met", "evidence"],
+                "propertyOrdering": ["criterion", "met", "evidence"],
+            },
+        },
+        **{
+            section: {
+                "type": "OBJECT",
+                "properties": {
+                    "score": {"type": "INTEGER", "minimum": 0, "maximum": 100},
+                    "feedback": {"type": "STRING"},
+                },
+                "required": ["score", "feedback"],
+                "propertyOrdering": ["score", "feedback"],
+            }
+            for section in ("code_quality", "testing", "security", "performance")
+        },
+    },
+    "required": [
+        "result", "score", "severity", "summary", "strengths", "issues",
+        "required_changes", "acceptance_criteria", "code_quality", "testing",
+        "security", "performance",
+    ],
+    "propertyOrdering": [
+        "result", "score", "severity", "summary", "strengths", "issues",
+        "required_changes", "acceptance_criteria", "code_quality", "testing",
+        "security", "performance",
+    ],
+}
 
 
 class AIService(ABC):
@@ -155,11 +269,133 @@ class MockAIService(AIService):
     async def generate_json(
         self, prompt: str, system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
-        # For mock provider, use the prompt context to return the correct
-        # structured payload for either technical review or manager review.
-        if "Provide your final manager review decision as JSON" in prompt or "You are reviewing an AI code review" in (system_prompt or ""):
+        sp = (system_prompt or "").lower()
+        p = prompt.lower()
+        if "baseline" in sp or "baseline" in p or "question bank" in p:
+            return self._generate_mock_baseline_questions(prompt)
+        if "generate_task" in sp or "generate next task" in p or "first task" in p or "dynamic task" in p:
+            return self._generate_mock_dynamic_task(prompt)
+        if "adaptability" in sp or "requirement change" in p:
+            return self._generate_mock_adaptability_change(prompt)
+        if "Provide your final manager review decision as JSON" in prompt or "You are reviewing an AI code review" in sp:
             return self._generate_mock_manager_review()
         return self._generate_mock_review()
+
+    def _generate_mock_baseline_questions(self, prompt: str) -> Dict[str, Any]:
+        return {
+            "questions": [
+                {
+                    "competency": "technical_knowledge",
+                    "question_type": "mcq",
+                    "prompt": "When building scalable backend services, which architecture pattern best isolates domain logic?",
+                    "options": [
+                        {"id": "A", "text": "Tight coupling inside single monolith files"},
+                        {"id": "B", "text": "Layered clean architecture separating controllers, services, and repositories"},
+                        {"id": "C", "text": "Direct database queries from raw route handlers"},
+                        {"id": "D", "text": "Global variable mutation across requests"}
+                    ],
+                    "correct_option": "B",
+                    "difficulty": "intermediate"
+                },
+                {
+                    "competency": "problem_solving",
+                    "question_type": "mcq",
+                    "prompt": "An API endpoint begins returning intermittent HTTP 500 errors after a high-traffic release. What is your first step?",
+                    "options": [
+                        {"id": "A", "text": "Restart the application server without checking logs"},
+                        {"id": "B", "text": "Inspect server logs and error stack traces to pinpoint failure root cause"},
+                        {"id": "C", "text": "Delete recent migration scripts"},
+                        {"id": "D", "text": "Increase API timeout limits"}
+                    ],
+                    "correct_option": "B",
+                    "difficulty": "intermediate"
+                },
+                {
+                    "competency": "critical_thinking",
+                    "question_type": "mcq",
+                    "prompt": "Which indexing strategy is most appropriate for a database table with frequent write operations?",
+                    "options": [
+                        {"id": "A", "text": "Index every column to speed up all queries"},
+                        {"id": "B", "text": "Index selectively on foreign keys and frequent WHERE/JOIN columns"},
+                        {"id": "C", "text": "Avoid indexes entirely"},
+                        {"id": "D", "text": "Use full-text search indexes for numeric fields"}
+                    ],
+                    "correct_option": "B",
+                    "difficulty": "intermediate"
+                },
+                {
+                    "competency": "communication",
+                    "question_type": "short_answer",
+                    "prompt": "Describe how you communicate a technical blocker to your manager and team when a critical dependency is delayed.",
+                    "rubric_keywords": ["blocker", "impact", "options", "timeline", "notify"],
+                    "difficulty": "intermediate"
+                },
+                {
+                    "competency": "adaptability",
+                    "question_type": "mcq",
+                    "prompt": "If a stakeholder requests a late scope change during a sprint, how should an engineer respond?",
+                    "options": [
+                        {"id": "A", "text": "Accept the change silently without assessing effort or timeline impact"},
+                        {"id": "B", "text": "Assess the impact on scope and timeline, then discuss trade-offs with the lead/manager"},
+                        {"id": "C", "text": "Reject the request outright without discussion"},
+                        {"id": "D", "text": "Abandon current tasks to work exclusively on the new request"}
+                    ],
+                    "correct_option": "B",
+                    "difficulty": "intermediate"
+                },
+                {
+                    "competency": "decision_making",
+                    "question_type": "mcq",
+                    "prompt": "When choosing between a quick hardcoded fix and a refactored modular solution, what guides the decision?",
+                    "options": [
+                        {"id": "A", "text": "Always choose hardcoded fixes to save time"},
+                        {"id": "B", "text": "Balance urgency, technical debt risk, system stability, and future maintainability"},
+                        {"id": "C", "text": "Refactor the entire codebase every time a minor bug occurs"},
+                        {"id": "D", "text": "Ignore the bug"}
+                    ],
+                    "correct_option": "B",
+                    "difficulty": "intermediate"
+                },
+                {
+                    "competency": "professionalism",
+                    "question_type": "short_answer",
+                    "prompt": "How do you incorporate constructive critical feedback on your code during a peer code review?",
+                    "rubric_keywords": ["feedback", "understand", "refactor", "test", "collaborate"],
+                    "difficulty": "intermediate"
+                }
+            ]
+        }
+
+    def _generate_mock_dynamic_task(self, prompt: str) -> Dict[str, Any]:
+        return {
+            "title": "Implement API Rate Limiting & Validation Layer",
+            "description": "Design and implement middleware for input validation and rate limiting to protect backend services.",
+            "acceptance_criteria": [
+                "Validate incoming request parameters against defined schemas",
+                "Enforce rate limits per IP/client token",
+                "Include unit tests covering valid and invalid payloads"
+            ],
+            "priority": "high",
+            "task_type": "coding",
+            "difficulty": "intermediate",
+            "estimated_hours": 4.0,
+            "dependencies": [],
+            "hints": [
+                "Review request validation schemas before writing custom parsers.",
+                "Consult with the DevOps engineer if configuring environment rate limits."
+            ],
+            "recommended_team_role": "Backend Developer",
+            "generation_reason": "Generated dynamically based on student's baseline proficiency and current sprint objectives."
+        }
+
+    def _generate_mock_adaptability_change(self, prompt: str) -> Dict[str, Any]:
+        return {
+            "title": "Requirement Change: Add Strict Token Authentication",
+            "description": "Due to updated compliance standards, your current task requires enforcing Bearer token verification on all endpoints.",
+            "original_requirement": "Implement standard session validation.",
+            "updated_requirement": "Enforce stateless JWT Bearer token authentication with scope validation.",
+            "reason": "Compliance requirement update mid-sprint."
+        }
 
     def _generate_mock_review(self) -> Dict[str, Any]:
         """Generate a deterministic mock review response for submission workflows."""
@@ -257,10 +493,13 @@ def is_transient_ai_overload(exc: BaseException) -> bool:
 class GeminiAIService(AIService):
     """Real Gemini-backed implementation, used once GEMINI_API_KEY is configured."""
 
-    # One quick retry smooths over transient model overload without noticeably
-    # delaying generation when Gemini is healthy.
-    OVERLOAD_MAX_ATTEMPTS = 2
-    OVERLOAD_RETRY_DELAY_SECONDS = 1.0
+    provider_name = "gemini"
+
+    # Three total requests means at most two retries. This matches the review
+    # endpoint's total timeout (3 * 20s plus 1s + 2s backoff, with headroom).
+    OVERLOAD_MAX_ATTEMPTS = 3
+    REQUEST_TIMEOUT_SECONDS = 20.0
+    OVERLOAD_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key
@@ -274,13 +513,28 @@ class GeminiAIService(AIService):
         if system_prompt:
             contents.append({"role": "user", "parts": [{"text": f"[SYSTEM]\n{system_prompt}"}]})
         contents.append({"role": "user", "parts": [{"text": prompt}]})
-        generation: Dict[str, Any] = {"temperature": 0.2, "maxOutputTokens": 512 if json_mode else 256}
+        is_baseline = "baseline assessment" in (system_prompt or "").lower()
+        is_evaluation = "answer evaluator" in (system_prompt or "").lower()
+        generation: Dict[str, Any] = {
+            # Review JSON contains a full rubric plus criterion-by-criterion
+            # evidence; 512 tokens can truncate valid reviews before parsing.
+            "maxOutputTokens": 4096 if is_baseline else (2048 if json_mode else 256),
+        }
+        # Gemini 3.5+ deprecates sampling controls; omit temperature for those
+        # models to avoid forward-incompatible request errors.
+        if not re.match(r"gemini-3\.(5|6|8)-", self.model):
+            generation["temperature"] = 0.2 if is_evaluation else (0.7 if is_baseline else 0.2)
         if json_mode:
             generation["responseMimeType"] = "application/json"
+            if "senior engineering reviewer" in (system_prompt or "").lower():
+                generation["responseSchema"] = AI_REVIEW_RESPONSE_SCHEMA
 
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        is_review_request = "senior engineering reviewer" in (system_prompt or "").lower()
+        max_attempts = self.OVERLOAD_MAX_ATTEMPTS if is_review_request else 2
+        async with httpx.AsyncClient(timeout=self.REQUEST_TIMEOUT_SECONDS) as client:
             last_error: Optional[Exception] = None
-            for attempt in range(self.OVERLOAD_MAX_ATTEMPTS):
+            for attempt in range(max_attempts):
+                request_started = time.perf_counter()
                 try:
                     response = await client.post(
                         self.base_url,
@@ -289,17 +543,50 @@ class GeminiAIService(AIService):
                     )
                     response.raise_for_status()
                     data = response.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                    candidates = data.get("candidates") if isinstance(data, dict) else None
+                    if not candidates:
+                        feedback = data.get("promptFeedback") if isinstance(data, dict) else None
+                        block_reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+                        raise AIProviderResponseError(
+                            f"provider returned no candidate (block_reason={block_reason or 'none'})"
+                        )
+                    candidate = candidates[0]
+                    content = candidate.get("content") if isinstance(candidate, dict) else None
+                    parts = content.get("parts") if isinstance(content, dict) else None
+                    text = parts[0].get("text") if parts and isinstance(parts[0], dict) else None
+                    if not isinstance(text, str) or not text.strip():
+                        raise AIProviderResponseError("provider candidate did not contain text")
+                    logger.info(
+                        "Gemini request completed model=%s attempt=%d duration_ms=%d",
+                        self.model,
+                        attempt + 1,
+                        int((time.perf_counter() - request_started) * 1000),
+                    )
+                    return text
                 except Exception as exc:
                     last_error = exc
-                    if not is_transient_ai_overload(exc) or attempt + 1 >= self.OVERLOAD_MAX_ATTEMPTS:
-                        raise
-                    logger.warning(
-                        "Gemini overloaded (503) for model %s; retrying once after %.1fs",
-                        self.model,
-                        self.OVERLOAD_RETRY_DELAY_SECONDS,
+                    response = getattr(exc, "response", None)
+                    status_code = getattr(response, "status_code", None)
+                    transient = (
+                        is_transient_ai_overload(exc)
+                        or status_code == 429
+                        or (status_code is not None and status_code >= 500)
+                        or isinstance(exc, httpx.RequestError)
                     )
-                    await asyncio.sleep(self.OVERLOAD_RETRY_DELAY_SECONDS)
+                    if not transient or attempt + 1 >= max_attempts:
+                        raise
+                    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                    delay = self.OVERLOAD_RETRY_DELAYS_SECONDS[min(attempt, len(self.OVERLOAD_RETRY_DELAYS_SECONDS) - 1)]
+                    logger.warning(
+                        "Gemini transient request failure model=%s status_code=%s attempt=%d/%d duration_ms=%d; retrying after %.1fs",
+                        self.model,
+                        status_code,
+                        attempt + 1,
+                        max_attempts,
+                        int((time.perf_counter() - request_started) * 1000),
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
             assert last_error is not None
             raise last_error
 
@@ -316,19 +603,28 @@ class GeminiAIService(AIService):
         cache_key = hashlib.sha256(
             f"{self.model}|json|{full_system}|{prompt}".encode("utf-8")
         ).hexdigest()
-        cached = _JSON_CACHE.get(cache_key)
+        # A malformed review must not be replayed from this response cache on
+        # a retry. Each attempt should get a fresh provider evaluation.
+        cached = _JSON_CACHE.get(cache_key) if is_json_response_cacheable(system_prompt) else None
         if cached is not None:
             return dict(cached)
+        raw = await self._call(prompt, full_system, json_mode=True)
         try:
-            raw = await self._call(prompt, full_system, json_mode=True)
-        except Exception:
-            logger.warning("Gemini JSON request failed for model %s; caller should use the deterministic fallback", self.model)
+            parsed = parse_json_response(raw)
+            _log_provider_json_response(self.model, raw, parsed)
+        except MalformedAIJSONError as parse_error:
+            _log_provider_json_response(self.model, raw, error=str(parse_error))
+            # Structured output is enabled for reviews. Malformed output is a
+            # validation failure, not a reason to spend another model call.
             raise
-        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        parsed = json.loads(cleaned)
-        if len(_JSON_CACHE) >= _JSON_CACHE_LIMIT:
-            _JSON_CACHE.pop(next(iter(_JSON_CACHE)))
-        _JSON_CACHE[cache_key] = parsed
+        if not isinstance(parsed, dict):
+            # Keep the interface contract explicit; arrays/scalars are not an
+            # evaluation object and must never reach score persistence.
+            raise MalformedAIJSONError("provider JSON root must be an object")
+        if is_json_response_cacheable(system_prompt):
+            if len(_JSON_CACHE) >= _JSON_CACHE_LIMIT:
+                _JSON_CACHE.pop(next(iter(_JSON_CACHE)))
+            _JSON_CACHE[cache_key] = parsed
         return dict(parsed)
 
 

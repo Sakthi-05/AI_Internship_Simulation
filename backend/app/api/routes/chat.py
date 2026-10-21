@@ -71,17 +71,6 @@ async def get_manager_chat_history(
     user: CurrentUser = Depends(get_current_user),
 ):
     _get_owned_company(company_id, db, user)
-    # The workplace is alive: the manager may have checked in since the
-    # student's last visit. At most one ambient message per cooldown window,
-    # persisted so it survives logout/login.
-    try:
-        from app.services import proactive_chat_service as proactive
-        msg = await proactive.maybe_send_proactive_message_async(db, company_id, channel="manager")
-        if msg is not None:
-            await proactive.broadcast_message(company_id, msg, channel="manager")
-    except Exception:
-        import logging as _logging
-        _logging.getLogger("aiwse.chat").warning("Proactive manager seed failed", exc_info=True)
     stmt = (
         select(Message)
         .where(
@@ -166,18 +155,6 @@ async def get_team_chat_history(
     `recipient_id` column on Message (straightforward follow-up).
     """
     _get_owned_company(company_id, db, user)
-    # Same liveness as the manager thread: a teammate may have reached out
-    # while the student was away. Cooldown-gated and persisted.
-    try:
-        from app.services import proactive_chat_service as proactive
-        msg = await proactive.maybe_send_proactive_message_async(
-            db, company_id, channel="team_member", teammate_id=team_member_id
-        )
-        if msg is not None:
-            await proactive.broadcast_message(company_id, msg, channel=f"team:{team_member_id}")
-    except Exception:
-        import logging as _logging
-        _logging.getLogger("aiwse.chat").warning("Proactive teammate seed failed", exc_info=True)
     stmt = (
         select(Message)
         .where(

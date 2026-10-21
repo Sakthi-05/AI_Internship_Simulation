@@ -24,7 +24,17 @@ from app.models.task import Task
 from app.services.ai.ai_service import AIService, get_ai_service
 
 
-def _payload(score, summary, marker=None):
+def _criteria_from_prompt(prompt):
+    marker = "ACCEPTANCE CRITERIA:\n"
+    if marker not in prompt:
+        return []
+    section = prompt.split(marker, 1)[1]
+    for boundary in ("\nSUBMITTED FILES:", "\nPREVIOUS REVIEW:", "\nSTUDENT-PROVIDED", "\nSUBMISSION:"):
+        section = section.split(boundary, 1)[0]
+    return [line[2:].strip() for line in section.splitlines() if line.startswith("- ")]
+
+
+def _payload(score, summary, prompt):
     return {
         "result": "changes_required",
         "score": score,
@@ -33,7 +43,10 @@ def _payload(score, summary, marker=None):
         "strengths": ["Structure is readable"],
         "issues": ["Missing error handling"],
         "required_changes": ["Handle invalid input and add tests before resubmitting."],
-        "acceptance_criteria": [],
+        "acceptance_criteria": [
+            {"criterion": item, "met": False, "evidence": "The submitted code does not demonstrate this requirement."}
+            for item in _criteria_from_prompt(prompt)
+        ],
         "code_quality": {"score": score, "feedback": "Acceptable for this scope."},
         "testing": {"score": score, "feedback": "Add coverage for the failing path."},
         "security": {"score": score, "feedback": "No issues found."},
@@ -44,11 +57,13 @@ def _payload(score, summary, marker=None):
 class _ChangesReviewer(AIService):
     """Deterministic reviewer that always requests changes."""
 
+    provider_name = "test_provider"
+
     async def generate_text(self, prompt, system_prompt=None):
         return "review"
 
     async def generate_json(self, prompt, system_prompt=None):
-        return _payload(41, "First attempt needs the listed changes before approval.")
+        return _payload(41, "First attempt needs the listed changes before approval.", prompt)
 
 
 class _CountingReviewer(_ChangesReviewer):
@@ -65,12 +80,14 @@ class _CountingReviewer(_ChangesReviewer):
 class _MarkerReviewer(AIService):
     """Scores by attempt marker so 'latest review wins' is observable."""
 
+    provider_name = "test_provider"
+
     async def generate_text(self, prompt, system_prompt=None):
         return "review"
 
     async def generate_json(self, prompt, system_prompt=None):
         score = 30 if "FIRST_ATTEMPT" in prompt else 92
-        return _payload(score, f"Deterministic evaluation scored this attempt {score}/100.")
+        return _payload(score, f"Deterministic evaluation scored this attempt {score}/100.", prompt)
 
 
 def _headers_for(student_id):

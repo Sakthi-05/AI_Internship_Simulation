@@ -13,7 +13,7 @@ from app.models.enums import TaskStatus
 from app.models.project import Project
 from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
-from app.models.simulation import Scenario, ScenarioTask, Simulation
+from app.models.simulation import Scenario, ScenarioTask, Simulation, WorkflowEvent
 from app.models.task import Task, TaskDependency
 from app.models.task_path import SimulationTaskPath
 from app.schemas.task import TaskRead, TaskStatusUpdate
@@ -86,6 +86,25 @@ def _to_task_read(task: Task, db: Session) -> TaskRead:
     dep_ids = db.execute(dep_stmt).scalars().all()
     data = TaskRead.model_validate(task)
     data.depends_on_task_ids = list(dep_ids)
+    
+    # Extract hints and dynamic metadata from task_metadata
+    metadata = task.task_metadata or {}
+    data.hints = metadata.get("hints", [])
+    data.recommended_team_role = metadata.get("recommended_team_role")
+    data.generation_reason = metadata.get("generation_reason")
+    data.performance_trend_at_generation = metadata.get("performance_trend_at_generation")
+    
+    # Add dependency details (titles of prerequisite tasks)
+    if dep_ids:
+        dep_tasks = db.execute(
+            select(Task.id, Task.title)
+            .where(Task.id.in_(dep_ids))
+        ).all()
+        data.dependency_details = [
+            {"task_id": str(tid), "title": title}
+            for tid, title in dep_tasks
+        ]
+    
     return data
 
 
@@ -207,6 +226,21 @@ async def update_task_status(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot start task from '{task.status.value}'. Must be in TODO or BACKLOG.",
+            )
+        
+        # Trigger contextual requirement change based on project state
+        # This implements FEATURE 14: adaptability tied to real task context
+        from app.services.engines.workflow_engine import maybe_trigger_contextual_requirement_change
+        try:
+            await maybe_trigger_contextual_requirement_change(
+                db, task, project, state, user.student_id
+            )
+        except Exception as exc:
+            # Don't fail task start if requirement change generation fails
+            import logging as _logging
+            _logging.getLogger("workflow").warning(
+                "Failed to trigger contextual requirement change task_id=%s: %s",
+                task.id, exc, exc_info=True
             )
 
     if payload.status == TaskStatus.SUBMITTED:

@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import ARRAY, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import ARRAY, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -46,6 +46,9 @@ class Task(Base, UUIDPKMixin, TimestampMixin):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     deliverable_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    task_metadata: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=dict, server_default=text("'{}'::jsonb")
+    )
 
     sprint = relationship("Sprint", back_populates="tasks")
     task_path_links = relationship("SimulationTaskPath", back_populates="task")

@@ -1,5 +1,6 @@
 import os
 import uuid
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,6 +28,11 @@ def _setup_database():
     with app_engine.begin() as conn:
         for value in ReviewStatus:
             conn.execute(text(f"ALTER TYPE ai_review_status_enum ADD VALUE IF NOT EXISTS '{value.value}'"))
+    # Enum types outlive the tables themselves between sessions, so extend the
+    # event enum the same way the runtime migrations do.
+    with app_engine.begin() as conn:
+        conn.execute(text("ALTER TYPE event_type_enum ADD VALUE IF NOT EXISTS 'SPRINT_COMPLETED'"))
+        conn.execute(text("ALTER TYPE event_type_enum ADD VALUE IF NOT EXISTS 'sprint_completed'"))
     yield
     with app_engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
@@ -56,3 +62,49 @@ def auth_headers():
 def other_auth_headers():
     token = make_token("student_002")
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def db():
+    from app.core.database import SessionLocal
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture
+def baseline_evaluator(monkeypatch):
+    """Deterministic provider double for baseline submission tests."""
+    from app.services import assessment_service
+
+    class Evaluator:
+        provider_name = "test-provider"
+        model = "deterministic-test"
+
+        async def generate_json(self, prompt, system_prompt=None):
+            payload = json.loads(prompt.split("Input JSON follows:\n", 1)[1].split("\n", 1)[0])
+            return {"evaluations": [
+                {
+                    "question_id": item["question_id"],
+                    "score": 82,
+                    "explanation": "The response addresses the technical prompt.",
+                    "feedback": "Add one concrete validation or test detail.",
+                }
+                for item in payload["items"] if item["evaluate_with_ai"]
+            ]}
+
+    monkeypatch.setattr(assessment_service, "get_ai_service", Evaluator)
+    return Evaluator
+
+
+@pytest.fixture
+def mock_student():
+    student_id = f"student_{uuid.uuid4().hex[:8]}"
+    token = make_token(student_id)
+    return {
+        "student_id": student_id,
+        "token": token,
+        "headers": {"Authorization": f"Bearer {token}"},
+    }

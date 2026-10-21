@@ -202,7 +202,7 @@ class TestPersonalisedTaskPathsAPI:
             db.close()
 
         headers = _headers("alltasks_student")
-        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": all_task_ids})
         assert resp.status_code == 200, resp.text
 
         path = client.get(f"/api/simulations/{sim_id}/task-path", headers=headers).json()
@@ -251,7 +251,7 @@ class TestPersonalisedTaskPathsAPI:
             db.close()
 
         headers = _headers("valid_student")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": all_task_ids})
         path = client.get(f"/api/simulations/{sim_id}/task-path", headers=headers).json()
 
         path_task_ids = {e["task_id"] for e in path}

@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import uuid
 import asyncio
+import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+import httpx
 
 from app.models.enums import ReviewResult, ReviewStatus, ReviewSeverity, SubmissionStatus, TaskStatus, EventType
 from app.models.manager import Manager
 from app.models.project import Project
 from app.models.project_state import ProjectState
+from app.models.sprint import Sprint
 from app.models.submission import AIReview, ReviewHistory, SubmissionVersion
 from app.models.task import Task
+from app.models.task_path import SimulationTaskPath
 from app.schemas.review import AIManagerDecision, AIReviewResponse
-from app.services.ai.ai_service import AIService, MockAIService
+from app.services.ai.ai_service import AIProviderResponseError, AIService, MalformedAIJSONError, MockAIService
 from app.services.ai.prompt_builder import build_review_prompt
 from app.services.content_extraction import extract_all_submission_files
 from app.services.context.context_builder import build_review_context
@@ -26,7 +31,29 @@ from app.services.notification_service import notify
 from app.services.engines.task_state_machine import validate_transition
 
 logger = logging.getLogger(__name__)
-REVIEW_PROVIDER_TIMEOUT_SECONDS = 8.0
+# 3 provider requests * 20s plus 1s and 2s backoff = 63s. Leave 5s for
+# parsing/persistence; the route's stale-claim lease is longer than this.
+REVIEW_PROVIDER_TIMEOUT_SECONDS = 68.0
+
+
+class ReviewEvaluationError(RuntimeError):
+    """Provider/evaluator failure with safe, non-secret diagnostic metadata."""
+
+    def __init__(self, category: str, provider: str, model: Optional[str], cause: Exception):
+        self.category = category
+        self.provider = provider
+        self.model = model
+        super().__init__(f"{category}: {type(cause).__name__}")
+
+
+def classify_provider_failure(exc: Exception) -> str:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException)):
+        return "provider_timeout"
+    if getattr(getattr(exc, "response", None), "status_code", None) == 429:
+        return "provider_rate_limited"
+    if isinstance(exc, (MalformedAIJSONError, AIProviderResponseError, json.JSONDecodeError, ValueError, KeyError, IndexError)):
+        return "malformed_response"
+    return "provider_error"
 
 
 def _manager_decision_from_technical_review(ai_review) -> Dict[str, Any]:
@@ -45,16 +72,12 @@ def _manager_decision_from_technical_review(ai_review) -> Dict[str, Any]:
     if actions:
         notes.append("Next: " + "; ".join(actions))
     feedback = " ".join(notes).strip() or summary
-    try:
-        return AIManagerDecision.model_validate({
-            "decision": decision,
-            "severity": severity,
-            "summary": summary[:300],
-            "feedback": feedback[:1000],
-        }).model_dump()
-    except Exception:
-        from app.services.ai.ai_service import MockAIService
-        return AIManagerDecision.model_validate(MockAIService()._generate_mock_manager_review()).model_dump()
+    return AIManagerDecision.model_validate({
+        "decision": decision,
+        "severity": severity,
+        "summary": summary[:300],
+        "feedback": feedback[:1000],
+    }).model_dump()
 
 
 def build_missing_evidence_payload(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -136,6 +159,44 @@ def _clean_str_list(values: Any) -> List[str]:
             if text:
                 cleaned.append(text)
     return cleaned
+
+
+def validate_provider_review(raw: Any, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a provider decision against the complete task rubric."""
+    required = {
+        "result", "score", "severity", "summary", "strengths", "issues",
+        "required_changes", "acceptance_criteria", "code_quality", "testing",
+        "security", "performance",
+    }
+    if not isinstance(raw, dict) or set(raw) != required:
+        raise ValueError("AI review fields do not match the required schema")
+    payload = AIReviewResponse.model_validate(raw, strict=True).model_dump()
+    if payload["score"] is None:
+        raise ValueError("AI review must include a numeric score")
+    for section in ("code_quality", "testing", "security", "performance"):
+        data = raw.get(section)
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"score", "feedback"}
+            or data.get("score") is None
+            or not str(data.get("feedback") or "").strip()
+        ):
+            raise ValueError(f"AI review must include scored, specific {section} feedback")
+    expected = [str(item).strip() for item in context.get("acceptance_criteria", []) if str(item).strip()]
+    criteria = payload["acceptance_criteria"]
+    if any(not isinstance(entry, dict) or set(entry) != {"criterion", "met", "evidence"} for entry in raw["acceptance_criteria"]):
+        raise ValueError("AI review criterion entries do not match the required schema")
+    actual = [entry["criterion"].strip() for entry in criteria]
+    if len(actual) != len(set(actual)) or set(actual) != set(expected) or len(actual) != len(expected):
+        raise ValueError("AI review must evaluate each task acceptance criterion exactly once")
+    if payload["result"] == "approved" and expected and not all(entry["met"] for entry in criteria):
+        raise ValueError("AI review cannot approve work without meeting every mandatory criterion")
+    if payload["result"] != "approved" and not payload["required_changes"]:
+        raise ValueError("Non-approved AI review must include actionable required corrections")
+    for field in ("strengths", "issues", "required_changes"):
+        if any(not isinstance(item, str) or not item.strip() for item in payload[field]):
+            raise ValueError(f"AI review {field} must contain only non-empty text")
+    return payload
 
 
 def shape_review_feedback(review_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -288,15 +349,54 @@ class ReviewService:
                 "score": existing_review.score,
                 "raw": existing_review.raw_payload,
             }
+        if existing_review is not None and existing_review.status == ReviewStatus.IN_PROGRESS:
+            return {
+                "review_id": str(existing_review.id),
+                "version_id": str(version.id),
+                "project_id": str(version.submission.task.sprint.project.id),
+                "status": ReviewStatus.IN_PROGRESS.value,
+                "result": None,
+                "score": None,
+                "summary": "Technical review is in progress.",
+            }
 
-        # Set version and task to UNDER_REVIEW when review starts
+        # Persist the claim before awaiting the provider so retries can observe
+        # the in-flight state and avoid evaluating the same version twice.
         version.status = SubmissionStatus.UNDER_REVIEW
         task = version.submission.task
         validate_transition(task.status, TaskStatus.UNDER_REVIEW)
         task.status = TaskStatus.UNDER_REVIEW
+        submission = version.submission
+        submission.status = SubmissionStatus.UNDER_REVIEW
+        ai_review = existing_review or AIReview(version_id=version.id)
+        attempt_history = list((ai_review.raw_payload or {}).get("attempt_history") or [])
+        if existing_review is not None and existing_review.status == ReviewStatus.FAILED:
+            previous_failure = existing_review.raw_payload or {}
+            attempt_history.append({
+                "status": "failed",
+                "error": previous_failure.get("error"),
+                "failure_type": previous_failure.get("failure_type"),
+                "message": previous_failure.get("message"),
+                "provider": previous_failure.get("provider"),
+                "model": previous_failure.get("model"),
+                "failed_at": existing_review.updated_at.isoformat() if existing_review.updated_at else None,
+            })
+        ai_review.status = ReviewStatus.IN_PROGRESS
+        ai_review.result = None
+        ai_review.score = None
+        ai_review.summary = "Technical review is in progress."
+        ai_review.raw_payload = {
+            "evaluation_source": getattr(self.ai_service, "provider_name", "unconfigured"),
+            "attempt_history": attempt_history,
+        }
+        ai_review.completed_at = None
+        db.add(ai_review)
         db.add(version)
         db.add(task)
-        db.flush()
+        db.add(submission)
+        db.commit()
+        db.refresh(version)
+        db.refresh(ai_review)
 
         # Trigger REVIEW_STARTED event
         project = task.sprint.project
@@ -321,48 +421,61 @@ class ReviewService:
             # that states exactly what evidence must be provided instead.
             review_payload = build_missing_evidence_payload(context)
             review_payload["missing_evidence"] = True
-        elif type(self.ai_service) is MockAIService:
-            # Make local decisions stable per task attempt rather than
-            # dependent on unrelated reviews processed earlier in this app.
-            fallback = MockAIService()
-            fallback._technical_review_calls = max(0, version.version_number - 1)
-            review_payload = AIReviewResponse.model_validate(
-                fallback._generate_mock_review()
-            ).model_dump()
-            evaluation_source = "mock_fallback"
+        elif isinstance(self.ai_service, MockAIService):
+            raise RuntimeError("AI review provider is not configured; no review decision was made")
         else:
             logger.info("Technical review AI call started version_id=%s", version.id)
+            provider = getattr(self.ai_service, "provider_name", "ai_provider")
+            model = getattr(self.ai_service, "model", None)
+            provider_started = time.perf_counter()
             try:
                 raw = await asyncio.wait_for(
                     self.ai_service.generate_json(prompt=prompt, system_prompt=system_prompt),
                     timeout=REVIEW_PROVIDER_TIMEOUT_SECONDS,
                 )
-                review_payload = AIReviewResponse.model_validate(raw).model_dump()
-                evaluation_source = "gemini"
-                logger.info("Technical review AI call completed version_id=%s", version.id)
-            except Exception:
+            except Exception as exc:
+                category = classify_provider_failure(exc)
                 logger.warning(
-                    "Technical review AI call failed; using the existing deterministic fallback version_id=%s",
-                    version.id,
-                    exc_info=True,
+                    "Technical review provider request failed category=%s provider=%s model=%s version_id=%s duration_ms=%d",
+                    category, provider, model, version.id,
+                    int((time.perf_counter() - provider_started) * 1000),
                 )
-                review_payload = None
-            if review_payload is None:
-                # A provider outage must not leave the committed task in
-                # UNDER_REVIEW forever. Use the same deterministic local
-                # decision sequence as no-key development mode: the first
-                # attempt requests changes; a resubmission is approved.
-                fallback = MockAIService()
-                fallback._technical_review_calls = max(0, version.version_number - 1)
-                review_payload = AIReviewResponse.model_validate(
-                    fallback._generate_mock_review()
-                ).model_dump()
-                evaluation_source = "mock_fallback_after_provider_error"
+                raise ReviewEvaluationError(category, provider, model, exc) from exc
+            try:
+                review_payload = validate_provider_review(raw, context)
+                evaluation_source = provider
+                logger.info(
+                    "Technical review AI call completed version_id=%s provider=%s model=%s duration_ms=%d",
+                    version.id, provider, model,
+                    int((time.perf_counter() - provider_started) * 1000),
+                )
+            except Exception as exc:
+                if hasattr(exc, "errors"):
+                    try:
+                        validation_diagnostic = [
+                            {key: item.get(key) for key in ("loc", "type", "msg")}
+                            for item in exc.errors(include_input=False)
+                        ]
+                    except TypeError:
+                        validation_diagnostic = [{"type": type(exc).__name__}]
+                else:
+                    validation_diagnostic = {"type": type(exc).__name__}
+                logger.warning(
+                    "Technical review provider response rejected category=malformed_response provider=%s model=%s version_id=%s",
+                    provider, model, version.id,
+                )
+                logger.debug(
+                    "Technical review response validation details version_id=%s errors=%s",
+                    version.id,
+                    json.dumps(validation_diagnostic, ensure_ascii=True, default=str),
+                )
+                raise ReviewEvaluationError("malformed_response", provider, model, exc) from exc
 
         review_payload["evaluation_source"] = evaluation_source
+        if attempt_history:
+            review_payload["attempt_history"] = attempt_history
 
         # Create the AIReview record
-        ai_review = existing_review or AIReview(version_id=version.id)
         ai_review.status = ReviewStatus.COMPLETED
         ai_review.result = ReviewResult(review_payload["result"])
         ai_review.severity = ReviewSeverity(review_payload["severity"])
@@ -372,6 +485,8 @@ class ReviewService:
         ai_review.actions = review_payload.get("actions", review_payload.get("required_changes", []))
         ai_review.score = review_payload["score"]
         ai_review.raw_payload = review_payload
+        ai_review.raw_payload["provider"] = evaluation_source
+        ai_review.raw_payload["model"] = getattr(self.ai_service, "model", None)
         ai_review.completed_at = datetime.now(timezone.utc)
         db.add(ai_review)
         db.flush()
@@ -436,7 +551,8 @@ class ReviewService:
             "review_id": str(ai_review.id),
             "evaluation_source": evaluation_source,
         }
-        if context.get("evidence_level") == "full":
+        simulation = None
+        if context.get("evidence_level") == "full" and evaluation_source not in ("unconfigured", "mock"):
             from app.models.simulation import Simulation
             from app.services.technical_adaptation_service import apply_technical_review_adaptation
 
@@ -448,15 +564,24 @@ class ReviewService:
             ).scalars().first()
             if simulation is not None:
                 logger.info("Technical adaptation started review_id=%s task_id=%s", ai_review.id, task.id)
-                adaptation = await apply_technical_review_adaptation(
-                    db,
-                    simulation=simulation,
-                    task=task,
-                    version=version,
-                    review=ai_review,
-                    review_payload=review_payload,
-                    evaluation_source=evaluation_source,
-                )
+                try:
+                    adaptation = await apply_technical_review_adaptation(
+                        db,
+                        simulation=simulation,
+                        task=task,
+                        version=version,
+                        review=ai_review,
+                        review_payload=review_payload,
+                        evaluation_source=evaluation_source,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Technical review scoring/adaptation failed review_id=%s task_id=%s",
+                        ai_review.id, task.id,
+                    )
+                    raise ReviewEvaluationError(
+                        "scoring_error", evaluation_source, getattr(self.ai_service, "model", None), exc
+                    ) from exc
                 logger.info(
                     "Technical adaptation completed review_id=%s difficulty=%s score=%s",
                     ai_review.id, adaptation.get("next_difficulty"), adaptation.get("technical_score"),
@@ -505,6 +630,105 @@ class ReviewService:
                 f"Changes requested for task '{task.title}': {ai_review.result.value}",
                 {"task_id": str(task.id), "review_id": str(ai_review.id), "result": ai_review.result.value},
             )
+
+        # DYNAMIC NEXT TASK GENERATION AFTER APPROVED REVIEW
+        # When a task is approved, generate the next dynamic task based on:
+        # - Current sprint objective (if not complete)
+        # - Next sprint objective (if current sprint is complete)
+        # - Recent performance trend
+        # - Updated competencies from this review
+        # - This ensures the next task is contextual to actual student performance
+        if ai_review.result == ReviewResult.APPROVED and simulation is not None:
+            from app.services.generators.dynamic_task_generator import generate_dynamic_task
+            from app.services.simulation.progression_service import calculate_sprint_progress
+            
+            # Get current sprint for the task
+            current_sprint = db.get(Sprint, task.sprint_id)
+            
+            if current_sprint:
+                # Check sprint objective progress before generating next task
+                sprint_progress = calculate_sprint_progress(db, simulation, current_sprint.id)
+                
+                target_sprint = None
+                reason_for_sprint = ""
+                
+                if not sprint_progress["objective_complete"]:
+                    # Current sprint still has work to do — generate next task in current sprint
+                    target_sprint = current_sprint
+                    reason_for_sprint = f"current sprint objective in progress ({sprint_progress['progress_percentage']}%)"
+                else:
+                    # Current sprint objective is complete — check for a NEXT sprint
+                    # Do NOT generate another task for the already-completed sprint
+                    next_sprint = db.execute(
+                        select(Sprint)
+                        .where(
+                            Sprint.project_id == current_sprint.project_id,
+                            Sprint.sprint_number > current_sprint.sprint_number,
+                        )
+                        .order_by(Sprint.sprint_number.asc())
+                    ).scalars().first()
+                    
+                    if next_sprint:
+                        # There is a next sprint — generate the first task for it
+                        target_sprint = next_sprint
+                        reason_for_sprint = (
+                            f"current sprint {current_sprint.sprint_number} objective achieved, "
+                            f"advancing to next sprint {next_sprint.sprint_number}: {next_sprint.goal}"
+                        )
+                        
+                        # Activate the next sprint so it becomes visible
+                        from app.services.simulation.progression_service import _activate_sprint
+                        _activate_sprint(db, next_sprint.id)
+                    else:
+                        # No more sprints — project/sprints all complete
+                        # Let the progression engine handle simulation completion naturally
+                        logger.info(
+                            "All sprints complete after approved review review_id=%s task_id=%s",
+                            ai_review.id, task.id,
+                        )
+                
+                if target_sprint is not None:
+                    try:
+                        # Generate next dynamic task based on this completed task
+                        # (Uses latest competencies, performance trend, and target sprint's goal)
+                        next_task = await generate_dynamic_task(
+                            db=db,
+                            simulation=simulation,
+                            sprint=target_sprint,
+                            student_id=version.submission.student_id,
+                            previous_task=task,  # Pass current task as previous for context/dependency
+                        )
+                        next_task.status = TaskStatus.BACKLOG
+                        db.add(next_task)
+                        
+                        # Create path entry for the new dynamic task
+                        max_seq = db.execute(
+                            select(SimulationTaskPath.sequence)
+                            .where(SimulationTaskPath.simulation_id == simulation.id)
+                            .order_by(SimulationTaskPath.sequence.desc())
+                        ).scalars().first() or 0
+                        
+                        new_path_entry = SimulationTaskPath(
+                            simulation_id=simulation.id,
+                            task_id=next_task.id,
+                            sequence=max_seq + 1,
+                            status=TaskStatus.BACKLOG,
+                        )
+                        db.add(new_path_entry)
+                        db.flush()
+                        
+                        logger.info(
+                            "Dynamic next task generated review_id=%s task_id=%s next_task_id=%s reason=%s sprint=%s",
+                            ai_review.id, task.id, next_task.id, reason_for_sprint,
+                            f"Sprint {target_sprint.sprint_number}",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to generate dynamic next task after review review_id=%s task_id=%s: %s",
+                            ai_review.id, task.id, exc, exc_info=True,
+                        )
+                        # Don't fail the review if task generation fails — the student can still complete the task
+                        # and progression engine will fall back to static path or retry later.
 
         db.commit()
         logger.info(

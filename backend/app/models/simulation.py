@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import ARRAY, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import ARRAY, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -49,6 +49,9 @@ class Simulation(Base, UUIDPKMixin, TimestampMixin):
     current_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     progress: Mapped[int] = mapped_column(default=0, nullable=False)
+    simulation_metadata: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=dict, server_default=text("'{}'::jsonb")
+    )
 
     company = relationship("Company", back_populates="simulations")
     project = relationship("Project", back_populates="simulations")

@@ -42,7 +42,6 @@ failure.
 """
 import hashlib
 import logging
-import random
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -255,7 +254,9 @@ def build_workplace_context(db: Session, company_id: uuid.UUID) -> Optional[Dict
         "simulation": active_sim,
         "has_simulation": bool(simulations),
         "current_task": current_task,
+        "tasks": project_tasks,
         "in_progress": in_progress,
+        "blocked": [t for t in project_tasks if t.status == TaskStatus.BLOCKED],
         "review_queue": review_queue,
         "overdue": overdue,
         "todo": todo,
@@ -491,6 +492,8 @@ _TRIGGER_SLOTS: Dict[str, Tuple[str, str]] = {
     "task_completed": ("manager", "encouragement"),
     "task_rework": ("manager", "feedback"),
     "simulation_started": ("manager", "welcome"),
+    "deadline_missed": ("manager", "reminder"),
+    "task_blocked": ("manager", "checkin"),
 }
 
 _MANAGER_ROTATION = ["checkin", "question", "encouragement", "meeting_request", "task_update"]
@@ -695,6 +698,7 @@ def persist_proactive_message(
     content: str,
     category: str,
     actor: str = "system",
+    event_id: Optional[str] = None,
 ) -> Message:
     msg = Message(
         company_id=company_id,
@@ -704,9 +708,16 @@ def persist_proactive_message(
     )
     db.add(msg)
     db.flush()
+    if event_id and event_id.startswith("deadline_missed:"):
+        from app.models.enums import NotificationType
+        from app.services.notification_service import notify
+        notify(db, company_id, NotificationType.DEADLINE_UPDATED, content)
     # Namespaced action doubles as the per-category send history that paces
     # future messages of the same kind.
-    log_activity(db, company_id, actor=actor, action=_proactive_action(category), detail=content[:200])
+    log_activity(
+        db, company_id, actor=actor, action=_proactive_action(category),
+        detail=content[:200], event_id=event_id,
+    )
     db.commit()
     db.refresh(msg)
     return msg
@@ -721,6 +732,8 @@ def maybe_send_proactive_message(
     trigger: Optional[str] = None,
     category: Optional[str] = None,
     seed: Optional[str] = None,
+    event_id: Optional[str] = None,
+    task_id: Optional[uuid.UUID] = None,
 ) -> Optional[Message]:
     """Generate and persist one proactive message, or return None if not due.
 
@@ -729,6 +742,20 @@ def maybe_send_proactive_message(
     """
     ctx = build_workplace_context(db, company_id)
     if ctx is None:
+        return None
+    if task_id is not None:
+        event_task = next((task for task in ctx["tasks"] if str(task.id) == str(task_id)), None)
+        if event_task is None:
+            return None
+        ctx["current_task"] = event_task
+    if not force and (trigger is None or event_id is None):
+        return None
+    if event_id and db.execute(
+        select(ActivityLog.id).where(
+            ActivityLog.company_id == company_id,
+            ActivityLog.metadata_json["event_id"].as_string() == event_id,
+        ).limit(1)
+    ).first():
         return None
     slot = choose_slot(ctx, channel=channel, teammate_id=teammate_id, trigger=trigger, category=category)
     if slot is None:
@@ -740,8 +767,10 @@ def maybe_send_proactive_message(
         (t for t in ctx["teammates"] if str(t.id) == sender_id), None
     )
     content = render_proactive_message(ctx, sender_type, sender, chosen_category, seed=seed)
+    if event_id and ctx["simulation"] is not None:
+        content = f"[{ctx['simulation'].title}] {content}"
     try:
-        return persist_proactive_message(db, company_id, sender_type, sender_id, content, chosen_category)
+        return persist_proactive_message(db, company_id, sender_type, sender_id, content, chosen_category, event_id=event_id)
     except Exception:
         logger.exception("Failed to persist proactive message for company %s", company_id)
         db.rollback()
@@ -758,6 +787,8 @@ async def maybe_send_proactive_message_async(
     category: Optional[str] = None,
     seed: Optional[str] = None,
     ai_service: Any = None,
+    event_id: Optional[str] = None,
+    task_id: Optional[uuid.UUID] = None,
 ) -> Optional[Message]:
     """Async variant that lets Gemini rewrite the message in character.
 
@@ -766,6 +797,20 @@ async def maybe_send_proactive_message_async(
     """
     ctx = build_workplace_context(db, company_id)
     if ctx is None:
+        return None
+    if task_id is not None:
+        event_task = next((task for task in ctx["tasks"] if str(task.id) == str(task_id)), None)
+        if event_task is None:
+            return None
+        ctx["current_task"] = event_task
+    if not force and (trigger is None or event_id is None):
+        return None
+    if event_id and db.execute(
+        select(ActivityLog.id).where(
+            ActivityLog.company_id == company_id,
+            ActivityLog.metadata_json["event_id"].as_string() == event_id,
+        ).limit(1)
+    ).first():
         return None
     slot = choose_slot(ctx, channel=channel, teammate_id=teammate_id, trigger=trigger, category=category)
     if slot is None:
@@ -777,6 +822,8 @@ async def maybe_send_proactive_message_async(
         (t for t in ctx["teammates"] if str(t.id) == sender_id), None
     )
     content = render_proactive_message(ctx, sender_type, sender, chosen_category, seed=seed)
+    if event_id and ctx["simulation"] is not None:
+        content = f"[{ctx['simulation'].title}] {content}"
 
     if settings.GEMINI_API_KEY:
         try:
@@ -807,7 +854,7 @@ async def maybe_send_proactive_message_async(
             logger.warning("Gemini proactive rewrite failed; using template", exc_info=True)
 
     try:
-        return persist_proactive_message(db, company_id, sender_type, sender_id, content, chosen_category)
+        return persist_proactive_message(db, company_id, sender_type, sender_id, content, chosen_category, event_id=event_id)
     except Exception:
         logger.exception("Failed to persist proactive message for company %s", company_id)
         db.rollback()
@@ -850,40 +897,33 @@ def _sweep_defers(ctx: Dict[str, Any]) -> bool:
 
 
 async def sweep_proactive_messages() -> int:
-    """Scheduler entry: ambient messages keep arriving while interns work.
-
-    Each company gets at most one message per run, only when its pacing
-    windows allow it, with an extra stagger so simultaneous companies don't
-    chime together. Returns the number of messages sent.
-    """
+    """Scheduler intervention sweep: respond only to a real overdue or blocked task."""
     from app.core.database import SessionLocal
     db: Session = SessionLocal()
     sent = 0
     try:
-        company_ids = db.execute(
-            select(Simulation.company_id).where(
-                Simulation.status == SimulationStatus.IN_PROGRESS
-            ).distinct()
+        simulations = db.execute(
+            select(Simulation).where(Simulation.status == SimulationStatus.IN_PROGRESS)
         ).scalars().all()
-        rng = random.Random()
-        for company_id in company_ids:
+        for simulation in simulations:
+            company_id = simulation.company_id
             try:
                 ctx = build_workplace_context(db, company_id)
-                if ctx is None or not is_due(ctx):
+                if ctx is None or ctx["simulation"] is None or ctx["simulation"].id != simulation.id:
                     continue
-                if _sweep_defers(ctx):
-                    continue
-                # Alternate voices so the workplace feels populated, not naggy.
-                if ctx["last_sender_type"] == MessageSenderType.MANAGER:
-                    channel: str = "team_member"
-                elif ctx["last_sender_type"] == MessageSenderType.TEAM_MEMBER:
-                    channel = "manager"
-                else:
-                    channel = rng.choice(["manager", "team_member"])
-                msg = await maybe_send_proactive_message_async(db, company_id, channel=channel)
-                if msg is not None:
-                    sent += 1
-                    await broadcast_message(company_id, msg, channel="manager" if msg.sender_type == MessageSenderType.MANAGER else "team")
+                actionable = [task for task in ctx["overdue"] if task.status in (TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED)]
+                actionable.extend(ctx["blocked"])
+                for task in {task.id: task for task in actionable}.values():
+                    kind = "deadline_missed" if task.deadline and (_aware(task.deadline) or ctx["now"]) < ctx["now"] else "task_blocked"
+                    event_id = f"{kind}:{simulation.id}:{task.id}:{task.deadline.isoformat() if task.deadline else task.blocked_reason or ''}"
+                    msg = await maybe_send_proactive_message_async(
+                        db, company_id, channel="manager", trigger=kind, event_id=event_id,
+                        task_id=task.id,
+                    )
+                    if msg is not None:
+                        sent += 1
+                        await broadcast_message(company_id, msg, channel="manager")
+                        break
             except Exception:
                 logger.exception("Proactive sweep failed for company %s", company_id)
                 db.rollback()

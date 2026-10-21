@@ -299,10 +299,10 @@ async def start_simulation(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Start a simulation: build task path, set first task, open workspace.
+    """Start a simulation: generate first task dynamically, set current task, open workspace.
 
-    Pass ``task_ids`` to give the student a personalised subset of canonical
-    project tasks.  Omit to include every canonical task.
+    Pass ``task_ids`` to use the legacy canonical task path mode.
+    Omit task_ids to enable dynamic task generation based on baseline/competency.
     """
     simulation = _get_owned_simulation(simulation_id, db, user)
 
@@ -317,12 +317,6 @@ async def start_simulation(
     simulation.started_at = datetime.now(timezone.utc)
     simulation.progress = 0
 
-    # Build the student's personalised task path from canonical project tasks
-    from app.services.simulation.task_path_builder import build_task_path
-    path_entries = build_task_path(
-        db, simulation_id, simulation.project_id, task_ids=body.task_ids
-    )
-    
     # Find the first scenario (by sequence) — lenient if missing
     first_scenario = db.execute(
         select(Scenario)
@@ -335,10 +329,56 @@ async def start_simulation(
         simulation.current_scenario_id = first_scenario.id
         db.add(first_scenario)
 
-    # Select the first valid task under path, sprint, and dependency rules.
-    if path_entries:
-        from app.services.simulation.task_access_service import repair_current_task
-        repair_current_task(db, simulation)
+    # DYNAMIC FIRST TASK GENERATION
+    # If task_ids are explicitly provided, use the canonical path (legacy mode)
+    # Otherwise, generate the first task dynamically based on baseline/competency
+    if body.task_ids:
+        # Legacy mode: use explicit task path
+        from app.services.simulation.task_path_builder import build_task_path
+        path_entries = build_task_path(
+            db, simulation_id, simulation.project_id, task_ids=body.task_ids
+        )
+        if path_entries:
+            from app.services.simulation.task_access_service import repair_current_task
+            repair_current_task(db, simulation)
+    else:
+        # Dynamic mode: generate first task based on student's baseline and competency
+        from app.services.generators.dynamic_task_generator import generate_dynamic_task
+        from app.models.sprint import Sprint
+        
+        # Get the first sprint (Foundation & Setup)
+        first_sprint = db.execute(
+            select(Sprint)
+            .where(Sprint.project_id == simulation.project_id)
+            .order_by(Sprint.sprint_number)
+        ).scalars().first()
+        
+        if first_sprint:
+            # Generate first dynamic task (previous_task=None indicates first task)
+            first_task = await generate_dynamic_task(
+                db=db,
+                simulation=simulation,
+                sprint=first_sprint,
+                student_id=user.student_id,
+                previous_task=None  # First task has no predecessor
+            )
+            first_task.status = TaskStatus.TODO
+            db.add(first_task)
+            
+            # Create path entry for the dynamic task
+            from app.models.task_path import SimulationTaskPath
+            path_entry = SimulationTaskPath(
+                simulation_id=simulation.id,
+                task_id=first_task.id,
+                sequence=1,
+                status=TaskStatus.TODO,
+            )
+            db.add(path_entry)
+            
+            # Set as current task
+            simulation.current_task_id = first_task.id
+            db.add(simulation)
+            db.flush()
 
     if first_scenario and simulation.current_scenario_id != first_scenario.id:
         simulation.current_scenario_id = first_scenario.id
@@ -378,7 +418,9 @@ async def start_simulation(
     try:
         from app.services import proactive_chat_service as proactive
         msg = proactive.maybe_send_proactive_message(
-            db, simulation.company_id, channel="manager", trigger="simulation_started"
+            db, simulation.company_id, channel="manager", trigger="simulation_started",
+            event_id=f"simulation_started:{simulation.id}",
+            task_id=simulation.current_task_id,
         )
         if msg is not None:
             await proactive.broadcast_message(simulation.company_id, msg, channel="manager")
@@ -1081,7 +1123,9 @@ async def start_simulation_task(
     try:
         from app.services import proactive_chat_service as proactive
         msg = proactive.maybe_send_proactive_message(
-            db, simulation.company_id, channel="team_member", trigger="task_started"
+            db, simulation.company_id, channel="team_member", trigger="task_started",
+            event_id=f"task_started:{simulation.id}:{task.id}",
+            task_id=task.id,
         )
         if msg is not None:
             await proactive.broadcast_message(simulation.company_id, msg, channel="team")
@@ -1387,7 +1431,9 @@ async def submit_simulation_task(
     try:
         from app.services import proactive_chat_service as proactive
         msg = proactive.maybe_send_proactive_message(
-            db, simulation.company_id, channel="manager", trigger="task_submitted"
+            db, simulation.company_id, channel="manager", trigger="task_submitted",
+            event_id=f"task_submitted:{simulation.id}:{result.get('version_id') or result.get('submission_id')}",
+            task_id=task.id,
         )
         if msg is not None:
             await proactive.broadcast_message(simulation.company_id, msg, channel="manager")
@@ -1701,6 +1747,8 @@ async def complete_simulation_task(
             simulation.company_id,
             channel="manager",
             trigger="task_completed" if approved else "task_rework",
+            event_id=f"task_verdict:{simulation.id}:{task.id}:{task.updated_at.isoformat() if task.updated_at else task.status.value}",
+            task_id=task.id,
         )
         if msg is not None:
             await proactive.broadcast_message(simulation.company_id, msg, channel="manager")

@@ -141,6 +141,13 @@ export default function SimulationWorkspace() {
     try {
       const result = await submitTask.mutateAsync({ taskId: currentTaskData.task_id, files, metadata });
       setShowSubmissionModal(false);
+      // Submission and review are separate persisted requests. Refresh the
+      // Board as soon as the version exists so UNDER_REVIEW becomes visible
+      // while provider evaluation is still running.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["board", simulation?.projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] }),
+      ]);
       if (result.version_id && simulation?.projectId) {
         try {
           const review = await apiClient.post(

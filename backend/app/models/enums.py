@@ -228,6 +228,7 @@ class EventType(str, enum.Enum):
     CODE_REVIEW = "code_review"
     SPRINT_PLANNING = "sprint_planning"
     SPRINT_REVIEW = "sprint_review"
+    SPRINT_COMPLETED = "sprint_completed"
     PRODUCTION_FAILURE = "production_failure"
     DATABASE_CHANGE = "database_change"
     SECURITY_AUDIT = "security_audit"

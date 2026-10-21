@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -62,6 +62,9 @@ class AssessmentAttempt(Base, UUIDPKMixin, TimestampMixin):
     question_ids: Mapped[List[str]] = mapped_column(JSONB, nullable=False, default=list)
     overall_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     competencies: Mapped[Dict[str, float]] = mapped_column(JSONB, nullable=False, default=dict)
+    generation_metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True, default=dict, server_default=text("'{}'::jsonb")
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

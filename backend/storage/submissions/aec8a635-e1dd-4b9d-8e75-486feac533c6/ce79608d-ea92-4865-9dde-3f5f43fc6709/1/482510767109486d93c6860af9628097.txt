@@ -1,0 +1,80 @@
+from fastapi.testclient import TestClient
+
+from solution import app
+
+
+client = TestClient(app)
+
+
+def test_parse_text_document():
+    """Valid text documents should be parsed successfully."""
+
+    response = client.post(
+        "/documents/parse",
+        files={
+            "file": (
+                "resume.txt",
+                b"Python FastAPI Backend Developer",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["filename"] == "resume.txt"
+    assert data["text"] == "Python FastAPI Backend Developer"
+    assert data["character_count"] == 34
+
+
+def test_empty_document():
+    """Empty documents should be rejected."""
+
+    response = client.post(
+        "/documents/parse",
+        files={
+            "file": (
+                "empty.txt",
+                b"",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_unsupported_document_type():
+    """Unsupported file types should be rejected."""
+
+    response = client.post(
+        "/documents/parse",
+        files={
+            "file": (
+                "resume.jpg",
+                b"fake image",
+                "image/jpeg",
+            )
+        },
+    )
+
+    assert response.status_code == 415
+
+
+def test_invalid_utf8_document():
+    """Invalid UTF-8 text should produce a controlled error."""
+
+    response = client.post(
+        "/documents/parse",
+        files={
+            "file": (
+                "invalid.txt",
+                b"\xff\xfe\xfd",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 422

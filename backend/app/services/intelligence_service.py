@@ -224,6 +224,7 @@ async def assess_student(
 
 
 def serialize_profile(profile: StudentProfile) -> Dict[str, Any]:
+    baseline_evidence = profile.baseline_competencies or {}
     return {
         "student_id": profile.student_id,
         "full_name": profile.full_name,
@@ -235,6 +236,10 @@ def serialize_profile(profile: StudentProfile) -> Dict[str, Any]:
         "career_goal": profile.career_goal,
         "skills": profile.skills or [],
         "baseline_competencies": profile.baseline_competencies or {},
+        "baseline_unassessed_competencies": (
+            [key for key in COMPETENCIES if key not in baseline_evidence]
+            if profile.last_assessed_at else list(COMPETENCIES)
+        ),
         "current_competencies": profile.current_competencies or {},
         "strengths": profile.strengths or [],
         "weaknesses": profile.weaknesses or [],
@@ -620,3 +625,102 @@ def issue_certificate(db: Session, student_id: str, simulation_id: Optional[UUID
 
 def serialize_certificate(cert: Certificate) -> Dict[str, Any]:
     return {"id": str(cert.id), "student_id": cert.student_id, "simulation_id": str(cert.simulation_id) if cert.simulation_id else None, "certificate_number": cert.certificate_number, "title": cert.title, "domain": cert.domain, "readiness_percentile": cert.readiness_percentile, "issued_at": cert.issued_at.isoformat(), "metadata": cert.metadata_json}
+
+
+def calculate_performance_trend(db: Session, student_id: str, simulation_id: Optional[UUID] = None) -> Dict[str, Any]:
+    """
+    Computes performance trend states:
+    - improving
+    - stable
+    - declining
+    - recovering
+    - consistently_strong
+    - consistently_weak
+    - insufficient_evidence
+
+    Considers:
+    - recent technical scores
+    - submission quality
+    - version-over-version improvements (resubmission gains)
+    - recurring issues
+    - competency updates
+    """
+    from app.models.submission import AIReview, Submission, SubmissionVersion
+    from app.models.task import Task
+    from app.models.sprint import Sprint
+
+    query = (
+        select(AIReview, SubmissionVersion, Submission)
+        .join(SubmissionVersion, SubmissionVersion.id == AIReview.version_id)
+        .join(Submission, Submission.id == SubmissionVersion.submission_id)
+        .where(Submission.student_id == student_id, AIReview.score.isnot(None))
+    )
+    if simulation_id:
+        query = (
+            query.join(Task, Task.id == Submission.task_id)
+            .join(Sprint, Sprint.id == Task.sprint_id)
+            .where(Sprint.project_id.in_(
+                select(Simulation.project_id).where(Simulation.id == simulation_id)
+            ))
+        )
+    rows = db.execute(
+        query.order_by(SubmissionVersion.submitted_at.asc(), AIReview.created_at.asc())
+    ).all()
+
+    if not rows:
+        return {
+            "trend": "insufficient_evidence",
+            "score_avg": 60.0,
+            "recent_avg": 60.0,
+            "version_count": 0,
+            "recent_scores": [],
+            "resubmission_improvement": False,
+        }
+
+    scores = [float(r[0].score) for r in rows if r[0].score is not None]
+    if len(scores) < 2:
+        return {
+            "trend": "insufficient_evidence",
+            "score_avg": round(statistics.mean(scores), 2) if scores else 60.0,
+            "recent_avg": round(statistics.mean(scores), 2) if scores else 60.0,
+            "version_count": len(scores),
+            "recent_scores": scores,
+            "resubmission_improvement": False,
+        }
+
+    # Group scores by submission to check resubmission improvement
+    by_sub: Dict[str, List[float]] = {}
+    for review, version, submission in rows:
+        if review.score is not None:
+            by_sub.setdefault(str(submission.id), []).append(float(review.score))
+
+    improved_between_versions = False
+    for sub_id, sub_scores in by_sub.items():
+        if len(sub_scores) >= 2 and sub_scores[-1] > sub_scores[0] + 5.0:
+            improved_between_versions = True
+            break
+
+    recent = scores[-5:]
+    avg_recent = statistics.mean(recent)
+
+    if all(s >= 80.0 for s in recent[-3:]):
+        trend_state = "consistently_strong"
+    elif all(s < 60.0 for s in recent[-3:]):
+        trend_state = "consistently_weak"
+    elif len(recent) >= 2 and recent[-1] >= 75.0 and min(recent[:-1]) < 60.0 and improved_between_versions:
+        trend_state = "recovering"
+    elif len(recent) >= 2 and (recent[-1] - recent[0]) >= 8.0:
+        trend_state = "improving"
+    elif len(recent) >= 2 and (recent[0] - recent[-1]) >= 8.0:
+        trend_state = "declining"
+    else:
+        trend_state = "stable"
+
+    return {
+        "trend": trend_state,
+        "score_avg": round(statistics.mean(scores), 2),
+        "recent_avg": round(avg_recent, 2),
+        "version_count": len(scores),
+        "recent_scores": recent,
+        "resubmission_improvement": improved_between_versions,
+    }

@@ -119,19 +119,30 @@ def _create_simulation_via_db(client, auth_headers, student_id="test_student"):
 
         db.commit()
 
+        project_task_ids = [
+            str(tid[0])
+            for tid in db.execute(text("""
+                SELECT t.id FROM tasks t
+                JOIN sprints s ON s.id = t.sprint_id
+                WHERE s.project_id = :pid ORDER BY t.sequence
+            """), {"pid": project_id}).fetchall()
+        ]
+
         return {
             "simulation_id": sim_id,
             "company_id": company_id,
             "project_id": project_id,
             "scenario_id": scenario_id,
             "task_id": task_id,
+            "task_ids": project_task_ids,
         }
     finally:
         db.close()
 
 
-def _start_and_get_current_task(client, auth_headers, sim_id):
-    client.post(f"/api/simulations/{sim_id}/start", headers=auth_headers)
+def _start_and_get_current_task(client, auth_headers, sim_id, task_ids=None):
+    body = {"task_ids": task_ids} if task_ids else None
+    client.post(f"/api/simulations/{sim_id}/start", headers=auth_headers, json=body)
     resp = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=auth_headers)
     assert resp.status_code == 200, resp.text
     return resp.json()["task_id"]
@@ -282,7 +293,8 @@ class TestBoardLockStatus:
         sim_id = data["simulation_id"]
         project_id = data["project_id"]
 
-        _start_and_get_current_task(client, auth_headers, sim_id)
+        # Start in canonical mode so the board shows future (locked) tasks too.
+        _start_and_get_current_task(client, auth_headers, sim_id, task_ids=data["task_ids"])
 
         # Fetch board with simulation_id
         resp = client.get(

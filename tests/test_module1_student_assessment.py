@@ -52,7 +52,7 @@ def test_register_login_and_reject_duplicates(client):
     assert me.json()["full_name"] == "Module One"
 
 
-def test_profile_skills_assessment_and_recommendation(client):
+def test_profile_skills_assessment_and_recommendation(client, baseline_evaluator):
     created = client.post(
         "/api/auth/register",
         json={"email": "module1.assess@example.com", "password": "student-pass", "full_name": "Asha Rao"},
@@ -124,7 +124,13 @@ def test_profile_skills_assessment_and_recommendation(client):
     assert submitted.status_code == 200, submitted.text
     result = submitted.json()
     assert result["overall_score"] >= 70
+    expected_total = sum(item["score"] for item in result["evaluation"]["answers"]) / len(result["evaluation"]["answers"])
+    assert abs(result["overall_score"] - expected_total) < 1e-9
+    assert abs(result["evaluation"]["overall_score"] - expected_total) < 1e-9
+    assert result["profile"]["assessment_summary"] == f"Baseline assessment completed with an average question score of {expected_total:.2f}/100."
     assert "problem_solving" in result["competencies"]
+    assert "communication" in result["unassessed_competencies"]
+    assert "communication" not in result["profile"]["weaknesses"]
     assert result["profile"]["recommended_parameters"]["role"] == "Backend Developer"
     assert "Python" in result["profile"]["recommended_parameters"]["technology_stack"]
 

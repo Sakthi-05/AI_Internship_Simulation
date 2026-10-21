@@ -249,6 +249,37 @@ export default function TaskPanel({
           </section>
         )}
 
+        {(task.task_metadata?.hints || task.hints) && (task.task_metadata?.hints || task.hints).length > 0 && (
+          <section className="rounded-2xl border border-brand-500/30 bg-brand-500/5 p-4">
+            <h3 className="mb-2 flex items-center gap-2 font-display text-xs font-bold uppercase tracking-[0.14em] text-brand-300">
+              <span className="flex h-5 w-5 items-center justify-center rounded-md bg-brand-500/20 text-[11px]">💡</span>
+              Contextual Task Hints
+            </h3>
+            <ul className="space-y-1.5 text-sm text-text-muted">
+              {(task.task_metadata?.hints || task.hints).map((hint, idx) => (
+                <li key={idx} className="flex items-start gap-2">
+                  <span className="text-brand-400">•</span>
+                  <span>{hint}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {task.task_metadata?.recommended_team_role && (
+          <section className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-3 text-sm">
+            <span className="font-semibold text-text-faint">Team Member Available for Help: </span>
+            <span className="text-brand-300 font-medium">{task.task_metadata.recommended_team_role}</span>
+          </section>
+        )}
+
+        {task.task_metadata?.generation_reason && (
+          <section className="rounded-xl border border-white/[0.06] bg-ink/30 p-3 text-xs text-text-faint">
+            <span className="font-semibold">Dynamic Journey Note: </span>
+            <span>{task.task_metadata.generation_reason}</span>
+          </section>
+        )}
+
         {scenario?.required_skills && scenario.required_skills.length > 0 && (
           <section>
             <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint mb-3">

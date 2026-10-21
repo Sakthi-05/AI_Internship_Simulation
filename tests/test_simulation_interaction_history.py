@@ -89,7 +89,7 @@ class TestSimulationInteractionHistory:
             db.close()
 
         headers = _headers(student_id)
-        start = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        start = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": [str(task_id)]})
         assert start.status_code == 200, start.text
 
         begin = client.post(
@@ -130,7 +130,7 @@ class TestSimulationInteractionHistory:
             db.close()
 
         headers = _headers(student_id)
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": [str(task_id)]})
         client.post(f"/api/simulations/{sim_id}/tasks/{task_id}/start", headers=headers)
 
         submit = client.post(
@@ -156,7 +156,7 @@ class TestSimulationInteractionHistory:
         finally:
             db.close()
 
-        client.post(f"/api/simulations/{sim_id}/start", headers=_headers(student_id), json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=_headers(student_id), json={"task_ids": [str(_task_id)]})
         denied = client.get(
             f"/api/simulations/{sim_id}/interactions",
             headers=_headers("other_student"),

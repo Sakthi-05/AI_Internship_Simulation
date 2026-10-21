@@ -10,13 +10,14 @@ When a task becomes COMPLETED:
 6. If all scenarios/tasks are complete, mark simulation COMPLETED
 """
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import DifficultyLevel, ScenarioStatus, SimulationStatus, SprintStatus, TaskStatus
+from app.models.enums import DifficultyLevel, EventType, ScenarioStatus, SimulationStatus, SprintStatus, TaskStatus
+from app.models.project import Project
 from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
 from app.models.simulation import Simulation, Scenario, ScenarioTask
@@ -56,7 +57,7 @@ async def progress_to_next_task(
             completed_path_entry.completed_at = completed_task.completed_at or datetime.now(timezone.utc)
             db.add(completed_path_entry)
 
-        _sync_sprint_completion(db, simulation, completed_task.sprint_id)
+        await _sync_sprint_completion(db, simulation, completed_task.sprint_id)
 
         # Use the shared path eligibility rule so progression cannot skip an
         # ordered task, dependency, or unfinished sprint.
@@ -97,6 +98,51 @@ async def progress_to_next_task(
                 )
 
                 return next_task
+
+        # If no static path entry exists, check if current sprint requires a dynamic next task
+        # REMOVED: Fixed task-count logic (sprint_completed_count < 2)
+        # NOW: Sprint completion is determined by sprint objective, not arbitrary task count
+        # Dynamic tasks are now generated in the review pipeline after each approved task
+        # This section is kept for backward compatibility with legacy simulations
+        current_sprint = db.get(Sprint, completed_task.sprint_id)
+        if current_sprint and current_sprint.status != SprintStatus.COMPLETED:
+            # For dynamic mode, tasks are generated in review_service.py after approval
+            # This path is only reached for legacy simulations or if review generation failed
+            # We still provide a fallback task if the sprint is not complete
+            from app.services.generators.dynamic_task_generator import generate_dynamic_task
+            dyn_task = await generate_dynamic_task(db, simulation, current_sprint, user_id, completed_task)
+            dyn_task.status = TaskStatus.TODO
+
+            max_seq = db.execute(
+                select(SimulationTaskPath.sequence)
+                .where(SimulationTaskPath.simulation_id == simulation.id)
+                .order_by(SimulationTaskPath.sequence.desc())
+            ).scalars().first() or 0
+
+            new_entry = SimulationTaskPath(
+                simulation_id=simulation.id,
+                task_id=dyn_task.id,
+                sequence=max_seq + 1,
+                status=TaskStatus.TODO,
+            )
+            db.add(dyn_task)
+            db.add(new_entry)
+            simulation.current_task_id = dyn_task.id
+            simulation.progress = _calculate_simulation_progress(db, simulation)
+            db.add(simulation)
+            db.flush()
+
+            log_activity(
+                db,
+                company_id=simulation.company_id,
+                actor=user_id,
+                action="simulation_task_progressed",
+                detail=f"Fallback dynamic task '{dyn_task.title}' generated in sprint",
+                simulation_id=str(simulation.id),
+                task_id=str(dyn_task.id),
+                previous_task_id=str(completed_task.id),
+            )
+            return dyn_task
 
         remaining_path_task = db.execute(
             select(SimulationTaskPath.id)
@@ -387,8 +433,18 @@ def _calculate_simulation_progress(db: Session, simulation: Simulation) -> int:
     return int((completed_tasks / total_tasks * 100)) if total_tasks > 0 else 0
 
 
-def _sync_sprint_completion(db: Session, simulation: Simulation, sprint_id: UUID) -> None:
-    """Complete a sprint only when every assigned path task is completed."""
+async def _sync_sprint_completion(db: Session, simulation: Simulation, sprint_id: UUID) -> None:
+    """Complete a sprint only when every assigned path task is completed.
+    
+    Sprint completion is now objective-based rather than count-based.
+    A sprint is complete when all its tasks are COMPLETED, not when an arbitrary
+    number of tasks are done. This allows variable task counts per sprint.
+    
+    When a sprint completes:
+    1. Trigger SPRINT_COMPLETED event
+    2. Activate the next sprint if one exists
+    3. Generate the first dynamic task for the next sprint so work continues
+    """
     sprint = db.get(Sprint, sprint_id)
     if not sprint:
         return
@@ -402,7 +458,7 @@ def _sync_sprint_completion(db: Session, simulation: Simulation, sprint_id: UUID
             Task.status != TaskStatus.COMPLETED,
         )
     ).first()
-    if unfinished is None:
+    if unfinished is None and sprint.status != SprintStatus.COMPLETED:
         sprint.status = SprintStatus.COMPLETED
         db.add(sprint)
 
@@ -418,6 +474,84 @@ def _sync_sprint_completion(db: Session, simulation: Simulation, sprint_id: UUID
             if next_sprint:
                 state.current_sprint_number = next_sprint.sprint_number
                 db.add(state)
+
+        project = db.execute(
+            select(Project).where(Project.id == sprint.project_id)
+        ).scalar_one_or_none()
+
+        if project:
+            from app.services.engines.events_engine import trigger_event
+            sprint_progress = calculate_sprint_progress(db, simulation, sprint_id)
+            await trigger_event(
+                db, project, EventType.SPRINT_COMPLETED,
+                f"{sprint.name} objective achieved — all tasks completed. "
+                f"Sprint progress: {sprint_progress['progress_percentage']}%.",
+                {
+                    "sprint_id": str(sprint_id),
+                    "sprint_number": sprint.sprint_number,
+                    "sprint_goal": sprint.goal,
+                    "completed_tasks": sprint_progress.get("completed_tasks", 0),
+                    "total_tasks": sprint_progress.get("total_tasks", 0),
+                }
+            )
+
+            from app.services.notification_service import notify
+            notify(
+                db,
+                company_id=project.company_id,
+                notification_type="sprint_completed",
+                message=f"{sprint.name} complete! Objective achieved: {sprint.goal}",
+            )
+
+
+def calculate_sprint_progress(db: Session, simulation: Simulation, sprint_id: UUID) -> Dict[str, Any]:
+    """Calculate sprint objective progress based on completed tasks.
+    
+    Returns progress percentage and objective completion status.
+    This is used for UI display and to determine if more tasks are needed.
+    """
+    sprint = db.get(Sprint, sprint_id)
+    if not sprint:
+        return {"sprint_id": str(sprint_id), "progress_percentage": 0, "objective_complete": False}
+    
+    # Count total and completed tasks in this sprint for this simulation
+    path_tasks = db.execute(
+        select(SimulationTaskPath)
+        .join(Task, Task.id == SimulationTaskPath.task_id)
+        .where(
+            SimulationTaskPath.simulation_id == simulation.id,
+            Task.sprint_id == sprint_id,
+        )
+    ).scalars().all()
+    
+    if not path_tasks:
+        return {
+            "sprint_id": str(sprint_id),
+            "sprint_number": sprint.sprint_number,
+            "sprint_goal": sprint.goal,
+            "progress_percentage": 0,
+            "objective_complete": False,
+            "total_tasks": 0,
+            "completed_tasks": 0,
+        }
+    
+    total_tasks = len(path_tasks)
+    completed_tasks = sum(1 for entry in path_tasks if entry.task.status == TaskStatus.COMPLETED)
+    progress_percentage = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+    
+    # Sprint objective is complete when all tasks are done OR sprint is marked COMPLETED
+    objective_complete = (completed_tasks == total_tasks) or sprint.status == SprintStatus.COMPLETED
+    
+    return {
+        "sprint_id": str(sprint_id),
+        "sprint_number": sprint.sprint_number,
+        "sprint_goal": sprint.goal,
+        "progress_percentage": round(progress_percentage, 2),
+        "objective_complete": objective_complete,
+        "total_tasks": total_tasks,
+        "completed_tasks": completed_tasks,
+        "status": sprint.status.value,
+    }
 
 
 def _activate_sprint(db: Session, sprint_id: UUID) -> None:

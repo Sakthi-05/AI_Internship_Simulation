@@ -11,7 +11,7 @@ from app.core.database import SessionLocal
 from app.main import app
 from app.models.intelligence import StudentProfile
 from app.models.simulation import Scenario, ScenarioTask, WorkflowEvent
-from app.services.ai.ai_service import MockAIService, get_ai_service
+from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.engines.workflow_events_engine import trigger_requirement_change_event
 
 
@@ -110,12 +110,38 @@ def test_manager_review_does_not_call_gemini_again(client):
     student_id = "manager_reuse_student"
     headers = _headers(student_id)
 
-    class CountingAI(MockAIService):
-        json_calls = 0
+    class CountingAI(AIService):
+        provider_name = "test_provider"
+
+        def __init__(self):
+            self.json_calls = 0
+
+        async def generate_text(self, prompt, system_prompt=None):
+            return "review"
 
         async def generate_json(self, prompt, system_prompt=None):
-            CountingAI.json_calls += 1
-            return await super().generate_json(prompt, system_prompt)
+            self.json_calls += 1
+            section = prompt.split("ACCEPTANCE CRITERIA:\n", 1)[1] if "ACCEPTANCE CRITERIA:\n" in prompt else ""
+            for boundary in ("\nSUBMITTED FILES:", "\nPREVIOUS REVIEW:", "\nSTUDENT-PROVIDED", "\nSUBMISSION:"):
+                section = section.split(boundary, 1)[0]
+            criteria = [line[2:].strip() for line in section.splitlines() if line.startswith("- ")]
+            return {
+                "result": "approved",
+                "score": 95,
+                "severity": "info",
+                "summary": "The implementation meets the task requirements with clear evidence.",
+                "strengths": ["The submitted implementation is readable."],
+                "issues": [],
+                "required_changes": [],
+                "acceptance_criteria": [
+                    {"criterion": item, "met": True, "evidence": "The submitted implementation demonstrates this behavior."}
+                    for item in criteria
+                ],
+                "code_quality": {"score": 95, "feedback": "The implementation is clear and maintainable."},
+                "testing": {"score": 90, "feedback": "The submitted test evidence covers the expected behavior."},
+                "security": {"score": 90, "feedback": "No unsafe input handling is present in the submitted code."},
+                "performance": {"score": 90, "feedback": "The implementation is appropriate for the task scale."},
+            }
 
     counter = CountingAI()
     app.dependency_overrides[get_ai_service] = lambda: counter
@@ -140,11 +166,14 @@ def test_manager_review_does_not_call_gemini_again(client):
         submitted = client.post(
             f"/api/projects/{project_id}/submissions/tasks/{task_id}/submit",
             headers=headers,
-            files={"files": ("main.py", io.BytesIO(b"def hello():\n    return 'ok'\n"), "text/x-python")},
+            files={"files": ("main.py", io.BytesIO(
+                b"def hello(name):\n    if not name:\n        raise ValueError('name is required')\n    return f'hello {name}'\n\n"
+                b"def normalize_name(name):\n    return name.strip().title()\n"
+            ), "text/x-python")},
         )
         assert submitted.status_code == 201, submitted.text
         version_id = submitted.json()["version_id"]
-        before = CountingAI.json_calls
+        before = counter.json_calls
         reviewed = client.post(f"/api/projects/{project_id}/reviews/versions/{version_id}", headers=headers)
         assert reviewed.status_code == 201, reviewed.text
         managed = client.post(
@@ -152,7 +181,7 @@ def test_manager_review_does_not_call_gemini_again(client):
             headers=headers,
         )
         assert managed.status_code == 201, managed.text
-        assert CountingAI.json_calls - before == 1
+        assert counter.json_calls - before == 1
         assert managed.json()["manager_result"] == reviewed.json()["result"] or (
             reviewed.json()["result"] == "rejected" and managed.json()["manager_result"] == "changes_required"
         )

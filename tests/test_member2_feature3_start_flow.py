@@ -165,7 +165,7 @@ class TestStartSimulationFlow:
         finally:
             db.close()
 
-        resp = client.post(f"/api/simulations/{sim_id}/start", headers=_headers("start_status"), json={})
+        resp = client.post(f"/api/simulations/{sim_id}/start", headers=_headers("start_status"), json={"task_ids": task_ids})
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["status"] == "in_progress"
@@ -178,7 +178,7 @@ class TestStartSimulationFlow:
         finally:
             db.close()
 
-        resp = client.post(f"/api/simulations/{sim_id}/start", headers=_headers("start_taskid"), json={})
+        resp = client.post(f"/api/simulations/{sim_id}/start", headers=_headers("start_taskid"), json={"task_ids": task_ids})
         assert resp.status_code == 200
         data = resp.json()
         assert data["current_task"] is not None
@@ -192,7 +192,7 @@ class TestStartSimulationFlow:
         finally:
             db.close()
 
-        resp = client.post(f"/api/simulations/{sim_id}/start", headers=_headers("start_scid"), json={})
+        resp = client.post(f"/api/simulations/{sim_id}/start", headers=_headers("start_scid"), json={"task_ids": task_ids})
         assert resp.status_code == 200
         data = resp.json()
         assert data["current_scenario"] is not None
@@ -207,7 +207,7 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("current_valid")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
 
         resp = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers)
         assert resp.status_code == 200, resp.text
@@ -224,7 +224,7 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("not_none")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
 
         sim_resp = client.get(f"/api/simulations/{sim_id}", headers=headers)
         assert sim_resp.status_code == 200
@@ -239,7 +239,7 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("path_match")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
 
         task_resp = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers).json()
         path_resp = client.get(f"/api/simulations/{sim_id}/task-path", headers=headers).json()
@@ -256,7 +256,7 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("to_progress")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
 
         resp = client.post(
             f"/api/simulations/{sim_id}/tasks/{task_ids[0]}/start",
@@ -274,7 +274,7 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("progress_next")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
 
         # Start, submit, review, approve, and complete the first task
         client.post(f"/api/simulations/{sim_id}/tasks/{task_ids[0]}/start", headers=headers)
@@ -303,7 +303,7 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("valid_uuids")
-        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
         data = resp.json()
 
         uuid.UUID(data["simulation_id"])
@@ -321,8 +321,8 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("no_restart")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
-        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
+        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
         assert resp.status_code == 409
 
     def test_complete_flow_start_to_second_task(self, client):
@@ -336,7 +336,7 @@ class TestStartSimulationFlow:
         headers = _headers("full_flow")
 
         # 1. Start simulation
-        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        resp = client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
         assert resp.status_code == 200
         sim_data = resp.json()
         assert sim_data["status"] == "in_progress"
@@ -385,7 +385,7 @@ class TestStartSimulationFlow:
             db.close()
 
         headers = _headers("progress_pct")
-        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={})
+        client.post(f"/api/simulations/{sim_id}/start", headers=headers, json={"task_ids": task_ids})
 
         # Submit, review, approve, and complete the first task
         client.post(f"/api/simulations/{sim_id}/tasks/{task_ids[0]}/start", headers=headers)

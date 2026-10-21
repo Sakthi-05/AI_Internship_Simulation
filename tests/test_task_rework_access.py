@@ -83,6 +83,22 @@ def _generate(client, auth_headers, student_id):
     return resp.json()
 
 
+def _project_task_ids(project_id):
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT t.id FROM tasks t "
+                "JOIN sprints s ON s.id = t.sprint_id "
+                "WHERE s.project_id = :pid ORDER BY t.sequence"
+            ),
+            {"pid": project_id},
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+    finally:
+        db.close()
+
+
 def _headers_for(student_id):
     from tests.conftest import make_token
     return {"Authorization": f"Bearer {make_token(student_id)}"}
@@ -321,8 +337,10 @@ def test_full_lifecycle_submit_review_rework_approve_complete(client):
     assert client.post(f"/api/simulations/{sim_id}/start", headers=headers).status_code == 200
 
     task1 = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers).json()["task_id"]
-    path = client.get(f"/api/simulations/{sim_id}/task-path", headers=headers).json()
-    task2 = next(e["task_id"] for e in path if e["task_id"] != task1)
+    # Dynamic mode plans task-by-task, so the next task does not exist yet.
+    # Use the pre-planned canonical next task as the "future task" that must
+    # remain locked until the current one is approved and completed.
+    task2 = next(cid for cid in _project_task_ids(project_id) if cid != task1)
 
     assert client.post(f"/api/simulations/{sim_id}/tasks/{task1}/start", headers=headers).status_code == 200
     first = client.post(

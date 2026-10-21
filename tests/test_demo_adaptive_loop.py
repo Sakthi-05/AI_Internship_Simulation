@@ -86,7 +86,7 @@ def _world(student_id: str):
     return db, simulation.id, profile.id
 
 
-def test_assessment_returns_every_active_question_and_scores_profile():
+def test_assessment_returns_every_active_question_and_scores_profile(baseline_evaluator):
     db = SessionLocal()
     student_id = f"assess-{uuid.uuid4().hex[:8]}"
     try:
@@ -299,7 +299,7 @@ def test_completed_branch_survives_fetching_next_situation_again(client):
 
 
 @pytest.mark.asyncio
-async def test_full_flow_reaches_next_adaptive_situation():
+async def test_full_flow_reaches_next_adaptive_situation(baseline_evaluator):
     student_id = f"loop-{uuid.uuid4().hex[:8]}"
     db = SessionLocal()
     try:
