@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, status, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from app.models.enums import SimulationStatus, ScenarioStatus, TaskStatus, Submi
 from app.models.project import Project
 from app.models.sprint import Sprint
 from app.models.simulation import Simulation, Scenario, ScenarioTask, WorkflowEvent
+from app.models.soft_skill import SoftSkillEvidence  # noqa: F401
 from app.models.task import Task
 from app.models.task_path import SimulationTaskPath
 from app.models.submission import Submission, SubmissionVersion
@@ -213,7 +214,7 @@ def get_simulation(
                 WorkflowEvent.status.in_([WorkflowEventStatus.PENDING, WorkflowEventStatus.ACKNOWLEDGED])
             )
             .order_by(WorkflowEvent.occurred_at.desc())
-        ).scalar_one_or_none()
+        ).scalars().first()
     
     # Calculate time remaining if task is in progress
     remaining_time = None
@@ -899,7 +900,7 @@ async def get_current_task(
             WorkflowEvent.status.in_([WorkflowEventStatus.PENDING, WorkflowEventStatus.ACKNOWLEDGED])
         )
         .order_by(WorkflowEvent.occurred_at.desc())
-    ).scalar_one_or_none()
+    ).scalars().first()
 
     # Latest AI review feedback for resubmission guidance (None until a
     # submitted version has actually been reviewed). Read-only; the
@@ -1069,6 +1070,26 @@ async def start_simulation_task(
         metadata={"task_title": task.title},
     )
     
+    current_scenario = None
+    if simulation.current_scenario_id:
+        current_scenario = db.get(Scenario, simulation.current_scenario_id)
+
+    from app.services.workplace_scenarios import WorkplaceScenarioError, issue_requirement_change
+    try:
+        requirement_event = issue_requirement_change(
+            db,
+            simulation,
+            task,
+            trigger_activity="task_started",
+            scenario=current_scenario,
+        )
+    except WorkplaceScenarioError:
+        requirement_event = None
+        import logging as _logging
+        _logging.getLogger("aiwse.simulation").warning(
+            "Requirement change was not issued for task %s", task.id, exc_info=True
+        )
+
     # Trigger TASK_STARTED event
     from app.services.engines.events_engine import trigger_event
     from app.models.enums import EventType
@@ -1081,6 +1102,19 @@ async def start_simulation_task(
             f"Task '{task.title}' started",
             {"task_id": str(task.id), "task_title": task.title},
         )
+        if requirement_event is not None:
+            await trigger_event(
+                db,
+                project,
+                EventType.REQUIREMENT_CHANGE,
+                f"Requirement change for '{task.title}': {requirement_event.updated_requirement}",
+                {
+                    "task_id": str(task.id),
+                    "event_id": str(requirement_event.id),
+                    "original": requirement_event.original_requirement,
+                    "updated": requirement_event.updated_requirement,
+                },
+            )
 
     existing_checkin = db.execute(
         select(WorkflowEvent.id).where(
@@ -1422,6 +1456,15 @@ async def submit_simulation_task(
                 },
             )
     
+    from app.services.workplace_scenarios import record_task_submission_action
+    record_task_submission_action(
+        db,
+        simulation,
+        task,
+        user.student_id,
+        student_response or "",
+    )
+
     db.commit()
     db.refresh(task)
     db.refresh(simulation)
@@ -1496,6 +1539,71 @@ async def submit_simulation_task(
     }
 
 
+class WorkplaceActionRequest(BaseModel):
+    action: str = Field(default="adapted_work", min_length=1, max_length=80)
+    detail: str = Field(..., min_length=1, max_length=4000)
+
+
+def _owned_workflow_event(
+    db: Session,
+    simulation: Simulation,
+    task_id: uuid.UUID,
+    event_id: uuid.UUID,
+) -> tuple[Task, WorkflowEvent]:
+    task = db.get(Task, task_id)
+    event = db.get(WorkflowEvent, event_id)
+    if task is None or event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    if event.simulation_id != simulation.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Event does not belong to this simulation")
+    if event.task_id != task_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Event does not belong to this task")
+    return task, event
+
+
+@router.post("/{simulation_id}/tasks/{task_id}/events/{event_id}/acknowledge", status_code=status.HTTP_200_OK)
+async def acknowledge_simulation_event(
+    simulation_id: uuid.UUID,
+    task_id: uuid.UUID,
+    event_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Student confirms they saw a requirement change. The manager then writes."""
+    simulation = _get_owned_simulation(simulation_id, db, user)
+    task, event = _owned_workflow_event(db, simulation, task_id, event_id)
+    from app.services.workplace_scenarios import WorkplaceScenarioError, acknowledge_requirement_change
+    try:
+        payload = acknowledge_requirement_change(db, simulation, task, event, user.student_id)
+    except WorkplaceScenarioError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    db.commit()
+    return payload
+
+
+@router.post("/{simulation_id}/tasks/{task_id}/events/{event_id}/actions", status_code=status.HTTP_200_OK)
+async def record_simulation_event_action(
+    simulation_id: uuid.UUID,
+    task_id: uuid.UUID,
+    event_id: uuid.UUID,
+    payload: WorkplaceActionRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Record work the student did after replying to a requirement change."""
+    simulation = _get_owned_simulation(simulation_id, db, user)
+    task, event = _owned_workflow_event(db, simulation, task_id, event_id)
+    from app.services.workplace_scenarios import WorkplaceScenarioError, record_subsequent_action
+    try:
+        result = record_subsequent_action(
+            db, simulation, task, event, user.student_id, payload.action, payload.detail,
+        )
+    except WorkplaceScenarioError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    db.commit()
+    return result
+
+
 @router.post("/{simulation_id}/tasks/{task_id}/events/{event_id}/respond", status_code=status.HTTP_200_OK)
 async def respond_to_simulation_event(
     simulation_id: uuid.UUID,
@@ -1517,6 +1625,27 @@ async def respond_to_simulation_event(
     
     if event.task_id != task_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Event does not belong to this task")
+
+    if event.event_type == WorkflowEventType.REQUIREMENT_CHANGE:
+        task = db.get(Task, task_id)
+        from app.services.workplace_scenarios import WorkplaceScenarioError, record_requirement_reply
+        try:
+            result = record_requirement_reply(db, simulation, task, event, user.student_id, response)
+        except WorkplaceScenarioError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        record_interaction(
+            db,
+            simulation,
+            situation=event.message or event.title,
+            student_response=response,
+            decision="reply_requirement_change",
+            interaction_type="requirement_change_reply",
+            scenario_id=event.scenario_id,
+            task_id=task.id,
+            metadata={"event_id": str(event.id), "event_type": "requirement_change"},
+        )
+        db.commit()
+        return result
     
     # Record response
     from app.services.engines import respond_to_workflow_event
@@ -1566,28 +1695,13 @@ def get_task_events(
         )
         .order_by(WorkflowEvent.occurred_at)
     ).scalars().all()
-    
+    task = db.get(Task, task_id)
+    from app.services.workplace_scenarios import serialize_workflow_event
+
     return {
         "task_id": str(task_id),
         "simulation_id": str(simulation_id),
-        "events": [
-            {
-                "id": str(event.id),
-                "event_type": event.event_type.value,
-                "title": event.title,
-                "message": event.message,
-                "description": event.description,
-                "occurred_at": event.occurred_at.isoformat(),
-                "status": event.status,
-                "action_required": event.action_required,
-                "original_requirement": event.original_requirement,
-                "updated_requirement": event.updated_requirement,
-                "responded": event.response is not None,
-                "response": event.response,
-                "responded_at": event.responded_at.isoformat() if event.responded_at else None,
-            }
-            for event in events
-        ],
+        "events": [serialize_workflow_event(db, event, task) for event in events],
     }
 
 

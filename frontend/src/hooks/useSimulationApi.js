@@ -139,6 +139,12 @@ export function useTaskEvents(simulationId, taskId) {
   });
 }
 
+function refreshWorkplace(queryClient, simulationId, taskId) {
+  queryClient.invalidateQueries({ queryKey: ["taskEvents", simulationId, taskId] });
+  queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
+  queryClient.invalidateQueries({ queryKey: ["chat", "manager"] });
+}
+
 export function useRespondToEvent(simulationId, taskId) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -152,10 +158,34 @@ export function useRespondToEvent(simulationId, taskId) {
       );
       return res.data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["taskEvents", simulationId, taskId] });
-      queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
+    onSuccess: () => refreshWorkplace(queryClient, simulationId, taskId),
+  });
+}
+
+export function useAcknowledgeEvent(simulationId, taskId) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (eventId) => {
+      const res = await apiClient.post(
+        `/api/simulations/${simulationId}/tasks/${taskId}/events/${eventId}/acknowledge`
+      );
+      return res.data;
     },
+    onSuccess: () => refreshWorkplace(queryClient, simulationId, taskId),
+  });
+}
+
+export function useRecordWorkplaceAction(simulationId, taskId) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ eventId, detail }) => {
+      const res = await apiClient.post(
+        `/api/simulations/${simulationId}/tasks/${taskId}/events/${eventId}/actions`,
+        { action: "adapted_work", detail }
+      );
+      return res.data;
+    },
+    onSuccess: () => refreshWorkplace(queryClient, simulationId, taskId),
   });
 }
 

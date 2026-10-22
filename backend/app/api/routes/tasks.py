@@ -227,21 +227,6 @@ async def update_task_status(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot start task from '{task.status.value}'. Must be in TODO or BACKLOG.",
             )
-        
-        # Trigger contextual requirement change based on project state
-        # This implements FEATURE 14: adaptability tied to real task context
-        from app.services.engines.workflow_engine import maybe_trigger_contextual_requirement_change
-        try:
-            await maybe_trigger_contextual_requirement_change(
-                db, task, project, state, user.student_id
-            )
-        except Exception as exc:
-            # Don't fail task start if requirement change generation fails
-            import logging as _logging
-            _logging.getLogger("workflow").warning(
-                "Failed to trigger contextual requirement change task_id=%s: %s",
-                task.id, exc, exc_info=True
-            )
 
     if payload.status == TaskStatus.SUBMITTED:
         # Can only submit from IN_PROGRESS
@@ -303,6 +288,19 @@ async def update_task_status(
     ).scalar_one_or_none()
 
     _sync_project_state(db, task, previous_status, payload.status)
+
+    if payload.status == TaskStatus.IN_PROGRESS and previous_status != TaskStatus.IN_PROGRESS:
+        from app.services.engines.workflow_engine import maybe_trigger_contextual_requirement_change
+        try:
+            await maybe_trigger_contextual_requirement_change(
+                db, task, project, state, user.student_id
+            )
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger("workflow").warning(
+                "Failed to trigger contextual requirement change task_id=%s: %s",
+                task.id, exc, exc_info=True,
+            )
 
     # Log activity
     action = get_transition_action(previous_status, payload.status)

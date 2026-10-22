@@ -140,12 +140,6 @@ QUESTION_BANK = [
         "correct_option": "B",
     },
     {
-        "competency": "communication",
-        "question_type": "short_answer",
-        "prompt": "You are blocked by another team's API. Write the message you would send to your manager.",
-        "rubric_keywords": ["blocked", "api", "impact", "need", "next"],
-    },
-    {
         "competency": "critical_thinking",
         "question_type": "mcq",
         "prompt": "A dashboard shows a sudden drop in sign-ups. Which conclusion is justified?",
@@ -156,36 +150,6 @@ QUESTION_BANK = [
             {"id": "D", "text": "Charts are never useful, so ignore it."},
         ],
         "correct_option": "C",
-    },
-    {
-        "competency": "adaptability",
-        "question_type": "mcq",
-        "prompt": "Mid-sprint, the client changes the acceptance criteria. What should you do?",
-        "options": [
-            {"id": "A", "text": "Keep building the old criteria so your original plan stays intact."},
-            {"id": "B", "text": "Confirm the new criteria, identify what changes, and update the task with the team."},
-            {"id": "C", "text": "Delete the work already done."},
-            {"id": "D", "text": "Hide the change from the manager until the demo."},
-        ],
-        "correct_option": "B",
-    },
-    {
-        "competency": "time_management",
-        "question_type": "mcq",
-        "prompt": "You have three tasks and only enough time for two. How do you choose?",
-        "options": [
-            {"id": "A", "text": "Start all three and finish none."},
-            {"id": "B", "text": "Pick the highest-priority unblocked work, say what will slip, and protect a review buffer."},
-            {"id": "C", "text": "Work only on the task you enjoy."},
-            {"id": "D", "text": "Wait until someone assigns a fourth task."},
-        ],
-        "correct_option": "B",
-    },
-    {
-        "competency": "professionalism",
-        "question_type": "short_answer",
-        "prompt": "A code review points out a mistake in your pull request. How do you respond?",
-        "rubric_keywords": ["thanks", "fix", "test", "review", "agree"],
     },
 ]
 
@@ -202,7 +166,30 @@ def ensure_skill_catalog(db: Session) -> List[Skill]:
     return list(existing.values())
 
 
+_SOFT_SKILL_COMPETENCIES = {
+    "communication",
+    "adaptability",
+    "time_management",
+    "professionalism",
+    "collaboration",
+    "ownership",
+}
+
+
 def ensure_question_bank(db: Session) -> None:
+    standalone_soft_skill_mcqs = db.execute(
+        select(AssessmentQuestion).where(
+            AssessmentQuestion.question_type == "mcq",
+            AssessmentQuestion.competency.in_(_SOFT_SKILL_COMPETENCIES),
+            AssessmentQuestion.active.is_(True),
+        )
+    ).scalars().all()
+    for question in standalone_soft_skill_mcqs:
+        question.active = False
+        db.add(question)
+    if standalone_soft_skill_mcqs:
+        db.flush()
+
     count = db.execute(select(AssessmentQuestion.id).limit(1)).first()
     if count:
         return
@@ -420,11 +407,13 @@ async def generate_dynamic_baseline_questions(
             elif options or not isinstance(rubric, list) or not rubric or any(not isinstance(keyword, str) or not keyword.strip() for keyword in rubric):
                 raise ValueError("Short-answer evaluation rubric is missing")
             seen.add(normalized)
-            questions_list.append(AssessmentQuestion(
+            question = AssessmentQuestion(
                 prompt=text, competency=comp, question_type=kind, options=options,
                 correct_option=correct, rubric_keywords=rubric,
                 difficulty=difficulty, domain=role, active=True,
-            ))
+            )
+            db.add(question)
+            questions_list.append(question)
         # The set must contain material for this learner's role or rated stack.
         relevance = set(re.findall(r"[a-zA-Z+#.]{3,}", role.lower()))
         relevance.update(str(s["name"]).lower() for s in skills_context if s.get("name"))

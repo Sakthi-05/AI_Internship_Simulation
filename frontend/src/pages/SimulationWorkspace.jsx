@@ -15,16 +15,17 @@ import {
   useSimulationProgress,
   useTaskEvents,
   useRespondToEvent,
+  useAcknowledgeEvent,
+  useRecordWorkplaceAction,
 } from "../hooks/useSimulationApi";
 import { useCompany, useProject, useGenerateSimulation } from "../hooks/useApi";
 import { useAuth } from "../context/AuthContext";
 import LoadingScreen from "../components/LoadingScreen";
 import ScenarioPanel from "../components/simulation/ScenarioPanel";
 import TaskPanel from "../components/simulation/TaskPanel";
-import WorkplaceEventPanel from "../components/simulation/WorkplaceEventPanel";
 import ProgressIndicator from "../components/simulation/ProgressIndicator";
 import SimulationChatPanel from "../components/simulation/SimulationChatPanel";
-import AdaptiveInteractionPanel from "../components/simulation/AdaptiveInteractionPanel";
+import WorkplaceSimulation from "../components/simulation/WorkplaceSimulation";
 
 export default function SimulationWorkspace() {
   const { simulation, setSimulation } = useSimulation();
@@ -55,6 +56,8 @@ export default function SimulationWorkspace() {
     currentTaskData?.task_id
   );
   const respondToEvent = useRespondToEvent(simulationId, currentTaskData?.task_id);
+  const acknowledgeEvent = useAcknowledgeEvent(simulationId, currentTaskData?.task_id);
+  const recordWorkplaceAction = useRecordWorkplaceAction(simulationId, currentTaskData?.task_id);
 
   // Local state
   const [showSubmissionModal, setShowSubmissionModal] = useState(false);
@@ -230,8 +233,23 @@ export default function SimulationWorkspace() {
     try {
       await respondToEvent.mutateAsync({ eventId, response });
     } catch (error) {
-      console.error("Failed to respond to event:", error);
-      alert("Failed to record response. Please try again.");
+      setActionError(error.message || "The reply could not be saved.");
+    }
+  };
+
+  const handleAcknowledgeEvent = async (eventId) => {
+    try {
+      await acknowledgeEvent.mutateAsync(eventId);
+    } catch (error) {
+      setActionError(error.message || "The requirement change could not be acknowledged.");
+    }
+  };
+
+  const handleWorkplaceAction = async (eventId, detail) => {
+    try {
+      await recordWorkplaceAction.mutateAsync({ eventId, detail });
+    } catch (error) {
+      setActionError(error.message || "The adaptation could not be saved.");
     }
   };
 
@@ -279,7 +297,6 @@ export default function SimulationWorkspace() {
   const currentTask = currentTaskData;
   const progress = progressData;
   const events = eventsData?.events || [];
-  const activeEvent = events.find(e => e.status === "pending" || e.status === "acknowledged");
 
   // Simulation completed view
   if (simulationCompleted || sim?.status === "completed") {
@@ -453,18 +470,15 @@ export default function SimulationWorkspace() {
               progress={progress}
             />
           </div>
-          <div className="h-[280px]">
-            <WorkplaceEventPanel
-              events={events}
-              activeEvent={activeEvent}
-              onRespond={handleEventResponse}
-              isResponding={respondToEvent.isPending}
-              suppressModal={showSubmissionModal}
-            />
-          </div>
-          <div>
-            <AdaptiveInteractionPanel simulationId={simulationId} />
-          </div>
+          <WorkplaceSimulation
+            events={events}
+            onAcknowledge={handleAcknowledgeEvent}
+            onReply={handleEventResponse}
+            onRecordAction={handleWorkplaceAction}
+            isAcknowledging={acknowledgeEvent.isPending}
+            isReplying={respondToEvent.isPending}
+            isRecording={recordWorkplaceAction.isPending}
+          />
           <div className="h-[380px]">
             <SimulationChatPanel companyId={simulation?.companyId} />
           </div>

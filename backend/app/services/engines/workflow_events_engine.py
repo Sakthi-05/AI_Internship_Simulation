@@ -272,41 +272,9 @@ async def check_and_trigger_workflow_events(
                     event = await trigger_deadline_warning_event(db, simulation, task, scenario, remaining_minutes)
                     triggered_events.append(event)
 
-    if task.started_at and scenario:
-        from app.models.simulation import ScenarioTask
-
-        scenario_tasks = db.execute(
-            select(ScenarioTask)
-            .where(ScenarioTask.scenario_id == scenario.id)
-        ).scalars().all()
-
-        total_tasks = len(scenario_tasks)
-        if total_tasks > 0:
-            completed_count = 0
-            for st in scenario_tasks:
-                t = db.get(Task, st.task_id)
-                if t and t.status in (TaskStatus.COMPLETED, TaskStatus.UNDER_REVIEW, TaskStatus.MANAGER_APPROVAL):
-                    completed_count += 1
-
-            progress_ratio = completed_count / total_tasks
-            if progress_ratio >= REQUIREMENT_CHANGE_TRIGGER_STAGE:
-                existing_rc = db.execute(
-                    select(WorkflowEvent)
-                    .where(
-                        WorkflowEvent.simulation_id == simulation.id,
-                        WorkflowEvent.scenario_id == scenario.id,
-                        WorkflowEvent.event_type == WorkflowEventType.REQUIREMENT_CHANGE,
-                    )
-                ).scalar_one_or_none()
-
-                if not existing_rc:
-                    event = await trigger_requirement_change_event(
-                        db, simulation, task, scenario,
-                        original_requirement=f"Original requirement for {scenario.title}",
-                        updated_requirement=f"Updated requirement: The scope has been expanded to include additional {scenario.role} responsibilities.",
-                        trigger_condition="task_progress_30_percent",
-                    )
-                    triggered_events.append(event)
+    # Requirement changes are issued by workplace_scenarios when the student
+    # starts or is working the task. Progress percentage and the clock do not
+    # create a second, generic change.
 
     sprint = db.get(Sprint, task.sprint_id) if task and task.sprint_id else None
     if sprint is not None:
