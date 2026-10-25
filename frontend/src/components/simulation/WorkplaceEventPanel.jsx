@@ -58,9 +58,9 @@ export default function WorkplaceEventPanel({ events, activeEvent, onRespond, is
 
   const eventTypeColors = {
     requirement_change: "border-status-warning text-status-warning bg-status-warning/10",
-    deadline_warning: "border-status-blocked text-status-blocked bg-status-blocked/10",
+    deadline_warning: "border-status-progress text-status-progress bg-status-progress/10",
     stakeholder_message: "border-status-todo text-status-todo bg-status-todo/10",
-    bug_report: "border-status-blocked text-status-blocked bg-status-blocked/10",
+    bug_report: "border-status-progress text-status-progress bg-status-progress/10",
     priority_change: "border-status-review text-status-review bg-status-review/10",
   };
 

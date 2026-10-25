@@ -98,8 +98,8 @@ export default function TaskPanel({
 
   if (!task) {
     return (
-      <div className="card h-full flex items-center justify-center">
-        <p className="text-text-muted">No active task</p>
+      <div className="card flex min-h-64 items-center justify-center p-6 text-center">
+        <div><p className="text-sm font-semibold text-text">No active task</p><p className="mt-1 text-xs text-text-muted">The next task will appear here when it is available.</p></div>
       </div>
     );
   }
@@ -111,8 +111,8 @@ export default function TaskPanel({
     submitted: "bg-status-review/10 text-status-review border-status-review",
     under_review: "bg-status-review/10 text-status-review border-status-review",
     completed: "bg-status-completed/10 text-status-completed border-status-completed",
-    changes_requested: "bg-status-blocked/10 text-status-blocked border-status-blocked",
-    blocked: "bg-status-blocked/10 text-status-blocked border-status-blocked",
+    changes_requested: "bg-status-progress/10 text-status-progress border-status-progress/30",
+    blocked: "bg-status-progress/10 text-status-progress border-status-progress/30",
   };
 
   const statusLabels = {
@@ -126,18 +126,17 @@ export default function TaskPanel({
     blocked: "Blocked",
   };
 
-  const urgent = deadlineMissed || (remainingTime && remainingTime.minutes < 5 && remainingTime.hours === 0);
+  const timeWarning = !deadlineMissed && Boolean(remainingTime && remainingTime.minutes < 5 && remainingTime.hours === 0);
   const canEditWork = canSubmit || task.status === "changes_requested";
 
   return (
-    <div className="card flex flex-col overflow-hidden">
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-brand-500/[0.08] to-transparent" />
-      <div className="relative border-b border-white/[0.06] bg-white/[0.02] p-5">
-        <div className="mb-3 flex items-start justify-between gap-3">
+    <div className="card simulation-task-panel flex min-w-0 flex-col overflow-hidden">
+      <div className="simulation-task-header border-b p-5 sm:p-6">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
-            <p className="eyebrow mb-2">◈ Current Task</p>
+            <p className="eyebrow mb-2">Current task</p>
             <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
-              <span className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-wide ${statusColors[task.status]}`}>
+              <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${statusColors[task.status]}`}>
                 {statusLabels[task.status] || task.status}
               </span>
               {task.difficulty && (
@@ -154,48 +153,44 @@ export default function TaskPanel({
             <h2 className="font-display text-xl font-bold leading-snug sm:text-2xl">{task.title}</h2>
           </div>
 
-          <div className="shrink-0">
+          <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
             {remainingTime && (
-              <div className={`rounded-2xl border px-4 py-2.5 text-right ${urgent ? "animate-pulse-soft border-status-blocked/50 bg-status-blocked/10 shadow-[0_0_28px_-8px_rgba(239,91,91,0.8)]" : "border-brand-400/30 bg-brand-500/10 shadow-[0_0_28px_-10px_rgba(124,108,246,0.7)]"}`}>
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-text-faint">Time Remaining</p>
-                <p className={`font-mono text-2xl font-bold tabular-nums ${urgent ? "text-status-blocked" : "text-brand-200"}`}>
-                  {remainingTime.formatted}
-                </p>
-                {deadlineMissed && (
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-status-blocked">Deadline missed</p>
-                )}
+              <div className={`deadline-pill ${deadlineMissed ? "deadline-expired" : timeWarning ? "deadline-warning" : "deadline-active"}`}>
+                <span className="deadline-dot"/>
+                <span>{deadlineMissed ? "Expired" : timeWarning ? "Due soon" : "Time left"}</span>
+                <strong>{deadlineMissed ? "Deadline missed" : remainingTime.formatted.replace(/^Warning:\s*/, "")}</strong>
               </div>
             )}
             {!remainingTime && task.deadline && !task.started_at && (
-              <div className="rounded-2xl border border-white/[0.07] bg-white/[0.03] px-4 py-2.5 text-right">
-                <p className="text-[10px] uppercase tracking-wider text-text-faint">Estimated Duration</p>
-                <p className="font-mono text-xl font-bold text-text-muted">{task.estimated_hours}h</p>
+              <div className="deadline-pill deadline-planned">
+                <span className="deadline-dot"/><span>Estimate</span>
+                <strong>{task.estimated_hours}h</strong>
               </div>
             )}
           </div>
         </div>
 
-        <div className="flex items-center gap-4 text-sm text-text-muted">
+        <div className="task-meta-row flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-text-muted">
           {task.started_at && (
-            <span>Started: {new Date(task.started_at).toLocaleTimeString()}</span>
+            <span><b>Started</b> {new Date(task.started_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
           )}
           {task.deadline && (
-            <span>Deadline: {new Date(task.deadline).toLocaleString()}</span>
+            <span className={deadlineMissed ? "text-status-blocked" : timeWarning ? "text-status-progress" : ""}><b>Deadline</b> {new Date(task.deadline).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
           )}
           {task.estimated_hours && (
-            <span>Est. {task.estimated_hours}h</span>
+            <span><b>Estimate</b> {task.estimated_hours}h</span>
           )}
         </div>
       </div>
 
-      <div className="relative space-y-6 p-5">
+      <div className="simulation-task-body relative min-w-0 space-y-6 p-5 sm:p-6">
         <section>
           <h3 className="mb-3 flex items-center gap-2 font-display text-xs font-bold uppercase tracking-[0.14em] text-text-faint">
             <span className="flex h-5 w-5 items-center justify-center rounded-md bg-brand-500/15 text-[11px] text-brand-300">✎</span>
             Instructions
           </h3>
-          <div className="rounded-2xl border border-white/[0.06] bg-ink/40 p-4 text-sm leading-relaxed text-text-muted">
-            {task.instructions?.split("\n").map((paragraph, i) => (
+          <div className="task-instructions rounded-xl border p-4 text-sm leading-7 text-text-muted">
+            {(task.instructions || task.description || "No additional instructions are available for this task.").split("\n").map((paragraph, i) => (
               <p key={i} className="mb-2 last:mb-0">{paragraph}</p>
             ))}
           </div>
@@ -214,9 +209,9 @@ export default function TaskPanel({
                   initial={{ opacity: 0, x: -8 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: Math.min(i * 0.05, 0.3) }}
-                  className="flex items-start gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-colors hover:border-status-completed/30 hover:bg-status-completed/[0.04]"
+                  className="acceptance-criterion flex items-start gap-2.5 rounded-lg border p-3 transition-colors hover:border-status-completed/30 hover:bg-status-completed/[0.04]"
                 >
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-status-completed/15 text-[11px] font-bold text-status-completed shadow-[0_0_10px_rgba(62,214,149,0.4)]">✓</span>
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-status-completed/10 text-[11px] font-bold text-status-completed">✓</span>
                   <span className="text-sm text-text">{criterion}</span>
                 </motion.li>
               ))}
@@ -318,14 +313,14 @@ export default function TaskPanel({
 
       </div>
 
-      <div className="sticky bottom-0 z-10 space-y-3 border-t border-white/[0.07] bg-ink/70 p-4 backdrop-blur-2xl">
+      <div className="simulation-task-actions sticky bottom-0 z-10 space-y-3 border-t p-4">
         {canStart && (
           <motion.button
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={() => onStart(task.task_id)}
             disabled={isStarting}
-            className="btn-primary w-full py-3 text-lg flex items-center justify-center gap-2"
+            className="btn-primary w-full py-3 text-sm flex items-center justify-center gap-2"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -341,7 +336,7 @@ export default function TaskPanel({
             whileTap={{ scale: 0.98 }}
             onClick={() => setShowSubmissionModal(true)}
             disabled={isSubmitting}
-            className="btn-secondary w-full py-3 text-lg flex items-center justify-center gap-2"
+            className="btn-primary w-full py-3 text-sm flex items-center justify-center gap-2"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
@@ -432,11 +427,9 @@ export default function TaskPanel({
         )}
 
         {deadlineMissed && (
-          <div className="p-3 bg-status-blocked/10 border border-status-blocked/20 rounded">
-            <p className="text-sm text-status-blocked font-medium">Deadline Missed</p>
-            <p className="text-xs text-text-muted mt-1">
-              You can still submit your work, but it will be marked as late.
-            </p>
+          <div className="deadline-late-note" role="status">
+            <span className="deadline-late-icon">!</span>
+            <p><strong>Deadline missed.</strong> You can still submit your work; it will be marked as late.</p>
           </div>
         )}
       </div>
@@ -460,8 +453,8 @@ export default function TaskPanel({
 function ReviewFeedbackPanel({ feedback }) {
   if (!feedback) {
     return (
-      <div className="rounded-2xl border border-status-blocked/25 bg-status-blocked/[0.07] p-4">
-        <p className="text-sm font-bold text-status-blocked">✎ Changes Requested</p>
+      <div className="rounded-xl border border-status-progress/25 bg-status-progress/[0.06] p-4">
+        <p className="text-sm font-bold text-status-progress">Changes requested</p>
         <p className="mt-1 text-xs leading-relaxed text-text-muted">
           Your submission needs revisions. Review the feedback and resubmit.
         </p>
@@ -475,16 +468,16 @@ function ReviewFeedbackPanel({ feedback }) {
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      className="overflow-hidden rounded-2xl border border-status-blocked/25 bg-status-blocked/[0.05]"
+      className="overflow-hidden rounded-xl border border-status-progress/25 bg-status-progress/[0.04]"
     >
-      <div className="border-b border-status-blocked/20 bg-status-blocked/[0.08] px-4 py-3">
+      <div className="border-b border-status-progress/20 bg-status-progress/[0.07] px-4 py-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-bold text-status-blocked">
-            ✎ {feedback.is_previous_review ? "Previous AI Feedback" : "Changes Requested"}
+          <p className="text-sm font-bold text-status-progress">
+            {feedback.is_previous_review ? "Previous AI feedback" : "Changes requested"}
           </p>
           {feedback.score != null && (
             <span className="chip font-mono text-[11px]!">
-              AI score <strong className="text-status-blocked">{feedback.score}/100</strong>
+              AI score <strong className="text-status-progress">{feedback.score}/100</strong>
             </span>
           )}
         </div>
@@ -505,12 +498,12 @@ function ReviewFeedbackPanel({ feedback }) {
       <div className="space-y-4 p-4">
         {unmet.length > 0 && (
           <section>
-            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-blocked">
+            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-progress">
               ⚠ What was wrong — requirements not met
             </h4>
             <ul className="space-y-2">
               {unmet.map((item, i) => (
-                <li key={i} className="rounded-xl border border-status-blocked/20 bg-ink/40 px-3.5 py-2.5">
+                <li key={i} className="rounded-lg border border-status-progress/20 bg-white px-3.5 py-2.5">
                   <p className="text-[13px] font-semibold leading-snug text-text">{item.criterion}</p>
                   {item.evidence && (
                     <p className="mt-1 text-xs leading-relaxed text-text-muted">
@@ -534,7 +527,7 @@ function ReviewFeedbackPanel({ feedback }) {
 
         {required.length > 0 && (
           <section>
-            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-blocked">
+            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-progress">
               🔧 What to change — exact fixes
             </h4>
             <ol className="space-y-2">
@@ -544,9 +537,9 @@ function ReviewFeedbackPanel({ feedback }) {
                   initial={{ opacity: 0, x: -8 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: Math.min(i * 0.06, 0.3) }}
-                  className="flex items-start gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.03] px-3.5 py-2.5"
+                  className="flex items-start gap-2.5 rounded-lg border border-border bg-white px-3.5 py-2.5"
                 >
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-status-blocked/20 font-mono text-[11px] font-bold text-status-blocked">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-status-progress/10 font-mono text-[11px] font-bold text-status-progress">
                     {i + 1}
                   </span>
                   <span className="text-[13px] leading-relaxed text-text">{change}</span>
@@ -558,7 +551,7 @@ function ReviewFeedbackPanel({ feedback }) {
 
         {(feedback.testing_feedback || testItems.length > 0) && (
           <section>
-            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-blocked">
+            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-progress">
               🧪 What to test before resubmitting
             </h4>
             <div className="rounded-xl border border-white/[0.07] bg-white/[0.03] px-3.5 py-2.5 text-[13px] leading-relaxed text-text-muted">
@@ -567,7 +560,7 @@ function ReviewFeedbackPanel({ feedback }) {
                 <ul className="mt-1.5 space-y-1">
                   {testItems.map((criterion, i) => (
                     <li key={i} className="flex gap-1.5">
-                      <span className="text-status-blocked">▸</span><span>{criterion}</span>
+                      <span className="text-status-progress">▸</span><span>{criterion}</span>
                     </li>
                   ))}
                 </ul>
@@ -578,13 +571,13 @@ function ReviewFeedbackPanel({ feedback }) {
 
         {required.length > 0 && (
           <section>
-            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-blocked">
+            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-[0.12em] text-status-progress">
               ✅ Resubmission checklist
             </h4>
             <ul className="space-y-1.5">
               {required.map((change, i) => (
                 <li key={i} className="flex items-start gap-2 text-xs leading-relaxed text-text-muted">
-                  <span className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0 rounded border border-status-blocked/50" />
+                  <span className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0 rounded border border-status-progress/50" />
                   <span className="line-clamp-2">{change}</span>
                 </li>
               ))}

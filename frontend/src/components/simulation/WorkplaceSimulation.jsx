@@ -23,19 +23,19 @@ export default function WorkplaceSimulation({
   const otherEvents = (events || []).filter((event) => event.id !== change?.id);
 
   return (
-    <div className="card flex h-full min-h-[420px] flex-col overflow-hidden">
-      <div className="border-b border-white/[0.06] bg-white/[0.02] p-3.5">
-        <p className="eyebrow">Workplace simulation</p>
-        <h3 className="font-display text-sm font-bold">Requirement change</h3>
+    <div className="workplace-simulation-card card flex h-full min-h-[300px] flex-col overflow-hidden">
+      <div className="workplace-simulation-header border-b p-4">
+        <p className="eyebrow">Workplace context</p>
+        <h3 className="mt-1 font-display text-sm font-bold">Manager updates</h3>
       </div>
-      <div className="flex-1 space-y-3 overflow-y-auto p-3">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {!change && (
           <p className="text-sm text-text-muted">
             Requirement changes appear here when you start a task. Communication and adaptability are assessed from what you write and what you do next.
           </p>
         )}
         {change && phase !== "acknowledge" && (
-          <section className="space-y-2 rounded-xl border border-white/[0.07] bg-white/[0.03] p-3">
+          <section className="workplace-update-card space-y-3 rounded-xl border p-3.5">
             <p className="text-sm text-text">{change.message}</p>
             {change.original_requirement && (
               <div>
@@ -50,7 +50,7 @@ export default function WorkplaceSimulation({
               </div>
             )}
             {change.manager_message && (
-              <div className="rounded-lg border border-brand-400/20 bg-brand-500/10 p-2">
+              <div className="manager-message-box rounded-lg border p-2.5">
                 <p className="text-xs text-brand-300">Manager</p>
                 <p className="text-sm text-text">{change.manager_message}</p>
               </div>
@@ -118,7 +118,7 @@ export default function WorkplaceSimulation({
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-text-faint">Other workplace updates</p>
             {otherEvents.map((event) => (
-              <div key={event.id} className="rounded-lg border border-white/[0.06] p-2">
+              <div key={event.id} className="workplace-other-event rounded-lg border p-2.5">
                 <p className="text-sm text-text">{event.title || event.event_type}</p>
                 <p className="text-xs text-text-muted">{event.message}</p>
               </div>

@@ -415,14 +415,14 @@ export default function SimulationWorkspace() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-4 p-4 min-h-[calc(100vh-80px)]">
-      <header className="card flex flex-wrap items-center justify-between gap-3 px-5 py-3">
-        <div className="min-w-0"><p className="eyebrow">{company?.name || "Internship workspace"}</p><h1 className="truncate font-display text-lg font-semibold">{sim?.role || project?.role || "Technical work"}</h1></div>
-        <div className="flex flex-wrap items-center gap-2"><span className="chip capitalize">{sim?.difficulty || project?.difficulty || "Difficulty unavailable"}</span><span className="chip">Sprint {progress?.current_sprint_number || 1}</span></div>
+    <div className="simulation-workspace mx-auto min-h-[calc(100vh-80px)] w-full max-w-7xl space-y-4 p-4 sm:p-5">
+      <header className="simulation-context-bar card flex flex-wrap items-center justify-between gap-3 px-5 py-3.5">
+        <div className="min-w-0"><p className="eyebrow">{company?.name || "Internship workspace"}</p><h1 className="truncate font-display text-lg font-semibold">{sim?.role || project?.role || "Technical work"}</h1><p className="mt-0.5 truncate text-xs text-text-muted">{project?.title || sim?.title || "Active simulation"}</p></div>
+        <div className="flex flex-wrap items-center gap-2"><span className="chip capitalize">{sim?.difficulty || project?.difficulty || "Difficulty unavailable"}</span><span className="workspace-sprint-chip">Sprint {progress?.current_sprint_number || 1}</span></div>
       </header>
-      {(companyError || projectError) && <div className="card border-status-blocked/30 p-3 text-sm text-status-blocked" role="alert">Internship context could not be loaded: {(companyError || projectError).message}. Task data remains available where authorized.</div>}
+      {(companyError || projectError) && <div className="simulation-notice card border-status-blocked/30 p-3 text-sm text-status-blocked" role="alert">Internship context could not be loaded: {(companyError || projectError).message}. Task data remains available where authorized.</div>}
       {/* Progress Bar at top */}
-      <div className="card overflow-hidden p-0!">
+      <div className="card simulation-progress-card overflow-hidden p-0!">
         <ProgressIndicator
           simulation={sim}
           progress={progress}
@@ -434,14 +434,14 @@ export default function SimulationWorkspace() {
         <motion.div
           initial={{ opacity: 0, y: -6 }}
           animate={{ opacity: 1, y: 0 }}
-          className="card border-status-blocked/30 px-4 py-3 text-sm text-status-blocked"
+          className="simulation-notice card border-status-blocked/30 px-4 py-3 text-sm text-status-blocked"
           role="alert"
         >
           ⚠ {actionError}
         </motion.div>
       )}
 
-      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,0.8fr)]">
+      <div className="simulation-content-grid grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,380px)] 2xl:grid-cols-[minmax(0,1fr)_400px]">
         <main className="min-w-0">
           <TaskPanel
             task={currentTask}
@@ -462,8 +462,8 @@ export default function SimulationWorkspace() {
           />
         </main>
 
-        <aside className="min-w-0 space-y-4">
-          <div>
+        <aside className="simulation-context-column min-w-0 space-y-4">
+          <div className="min-w-0">
             <ScenarioPanel
               scenario={scenario}
               simulation={sim}
@@ -496,6 +496,7 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
   const { auth } = useAuth();
   const createSimulation = useCreateSimulation();
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
 
   // If context has a simulation ID, we already have a simulation
   const hasSimulation = Boolean(simulation?.id);
@@ -503,6 +504,7 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
   // If context only has companyId/projectId, create the simulation
   const handleCreateAndStart = async () => {
     if (!simulation?.companyId || !simulation?.projectId) return;
+    setCreateError("");
     setCreating(true);
     try {
       const result = await createSimulation.mutateAsync({
@@ -525,7 +527,7 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
       await onStartSimulation(result.simulation_id);
     } catch (err) {
       console.error("Failed to create simulation:", err);
-      alert("Failed to create simulation. Please try again.");
+      setCreateError(err?.message || "Failed to create simulation. Please try again.");
     } finally {
       setCreating(false);
     }
@@ -536,7 +538,7 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
       ["💼 Role", simulation.role || "Internship"],
       ["🎯 Difficulty", simulation.difficulty || "—"],
       ["📅 Duration", simulation.duration_weeks ? `${simulation.duration_weeks} weeks` : "—"],
-      ["🧩 Tasks", simulation.total_tasks || "?"],
+      ["🧩 Tasks", simulation.total_tasks ?? "—"],
     ];
     return (
       <div className="mx-auto max-w-3xl p-6 text-center">
@@ -544,22 +546,14 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
           initial={{ opacity: 0, y: 24, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-          className="card overflow-hidden p-8"
+          className="simulation-start-card card overflow-hidden p-7 sm:p-8"
         >
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-brand-500/20 via-brand-500/[0.06] to-transparent" />
           <div className="relative">
-            {error && <p className="mb-4 rounded-xl border border-status-blocked/30 bg-status-blocked/10 p-3 text-sm text-status-blocked" role="alert">{error}</p>}
-            <motion.div
-              initial={{ scale: 0.7, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              transition={{ type: "spring", stiffness: 260, damping: 18, delay: 0.1 }}
-              className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-3xl bg-gradient-to-br from-brand-500 via-brand-400 to-accent-cyan text-3xl shadow-[0_0_60px_-10px_rgba(124,108,246,1)]"
-            >
-              🚀
-            </motion.div>
+            {error && <p className="simulation-notice mb-4 rounded-lg border p-3 text-left text-sm text-status-blocked" role="alert">{error}</p>}
+            <div className="simulation-start-icon mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl text-2xl" aria-hidden="true">↗</div>
             <p className="eyebrow">Your workplace is ready</p>
             <h1 className="mt-2 font-display text-3xl font-bold">
-              Ready to <span className="gradient-text">Start Internship</span>
+              Ready to start your internship
             </h1>
             <p className="mx-auto mt-2 max-w-lg text-sm leading-relaxed text-text-muted">
               You're about to begin your <strong className="text-text">{simulation.role || "Internship"}</strong> simulation.
@@ -567,13 +561,13 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
             </p>
 
             <div className="mb-6 mt-6 space-y-3 text-left">
-              <div className="rounded-2xl border border-brand-400/20 bg-gradient-to-br from-brand-500/[0.08] to-accent-cyan/[0.05] p-4">
+              <div className="simulation-brief-card rounded-xl border p-4">
                 <p className="font-display font-semibold">{simulation.title}</p>
                 <p className="mt-1 text-sm text-text-muted">{simulation.description}</p>
               </div>
               <div className="grid grid-cols-2 gap-2 text-sm">
                 {facts.map(([k, v]) => (
-                  <div key={k} className="rounded-xl border border-white/[0.06] bg-ink/40 px-3.5 py-2.5 text-left">
+                  <div key={k} className="simulation-fact-card rounded-lg border px-3.5 py-2.5 text-left">
                     <p className="text-[11px] uppercase tracking-wider text-text-faint">{k}</p>
                     <p className="mt-0.5 font-semibold capitalize">{v}</p>
                   </div>
@@ -584,7 +578,7 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
             <motion.button
               whileHover={{ scale: 1.015 }}
               whileTap={{ scale: 0.985 }}
-              className="btn-primary w-full py-3.5 text-lg"
+              className="btn-primary w-full py-3.5 text-sm"
               onClick={() => onStartSimulation(simulation.id)}
               disabled={simulation.status !== "not_started"}
             >
@@ -605,16 +599,17 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="card p-10"
+        className="simulation-empty-card card p-8 sm:p-10"
       >
-        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-2xl">
-          🛰
+        <div className="simulation-start-icon mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl text-2xl" aria-hidden="true">
+          ◉
         </div>
         <h1 className="font-display text-2xl font-bold">No Active <span className="gradient-text">Simulation</span></h1>
         <p className="mx-auto mt-2 max-w-md text-sm text-text-muted">
           Complete the onboarding process to generate your internship simulation.
         </p>
         <div className="mx-auto mt-6 max-w-sm">
+          {(error || createError) && <p className="simulation-notice mb-3 rounded-lg border border-status-blocked/25 bg-status-blocked/5 p-3 text-left text-sm text-status-blocked" role="alert">{error || createError}</p>}
           {!simulation?.companyId ? (
             <a href="/" className="btn-primary w-full py-3">Go to Onboarding →</a>
           ) : (
@@ -652,13 +647,13 @@ function SimulationCompletionScreen({ simulation, progress, onNewSimulation }) {
   };
   const durationMinutes = simulation?.started_at && simulation?.completed_at
     ? Math.round((new Date(simulation.completed_at) - new Date(simulation.started_at)) / 60000)
-    : 0;
+    : null;
 
   const stats = [
-    ["⏱ Total Duration", `${durationMinutes} min`],
-    ["✓ Tasks Completed", `${progress?.completed_tasks || 0} / ${progress?.total_tasks || 0}`],
-    ["◈ Progress", `${progress?.overall_progress || 100}%`],
-    ["◷ Scenarios", `${progress?.scenarios?.length || 0}`],
+    ["⏱ Total Duration", durationMinutes == null ? "—" : `${durationMinutes} min`],
+    ["✓ Tasks Completed", progress?.completed_tasks == null || progress?.total_tasks == null ? "—" : `${progress.completed_tasks} / ${progress.total_tasks}`],
+    ["◈ Progress", progress?.overall_progress == null ? "—" : `${Math.round(Number(progress.overall_progress))}%`],
+    ["◷ Scenarios", progress?.scenarios == null ? "—" : `${progress.scenarios.length}`],
   ];
 
   return (
@@ -695,7 +690,7 @@ function SimulationCompletionScreen({ simulation, progress, onNewSimulation }) {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.3 + i * 0.08 }}
-              className="rounded-2xl border border-white/[0.07] bg-ink/50 p-4"
+              className="simulation-completion-stat rounded-xl border p-4"
             >
               <p className="text-xs text-text-faint">{k}</p>
               <p className="mt-1 font-mono text-2xl font-bold text-text">{v}</p>

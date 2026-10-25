@@ -17,26 +17,25 @@ export default function ScenarioPanel({ scenario, simulation, progress }) {
   const scenarioProgressPct = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   return (
-    <div className="card flex flex-col overflow-hidden">
+    <div className="simulation-scenario-panel card flex min-h-0 flex-col overflow-hidden">
       {/* Scenario Header */}
-      <div className="relative border-b border-white/[0.06] bg-white/[0.02] p-4">
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-brand-500/10 to-transparent" />
+      <div className="scenario-panel-header relative border-b p-4">
         <div className="relative flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="mb-2 flex items-center gap-1.5">
-              <span className="chip chip-glow font-mono text-[10px]!">
-                ◈ Scenario {scenario.sequence}
+              <span className="chip chip-glow text-[10px]!">
+                Scenario {scenario.sequence}
               </span>
               <span className="chip text-[10px]! capitalize">
                 {scenario.difficulty}
               </span>
             </div>
-            <h2 className="font-display text-lg font-bold leading-snug">{scenario.title}</h2>
-            <p className="mt-1 text-sm leading-relaxed text-text-muted">{scenario.description}</p>
+            <h2 className="font-display text-base font-bold leading-snug">{scenario.title}</h2>
+            <p className="mt-1.5 text-xs leading-5 text-text-muted">{scenario.description}</p>
           </div>
-          <div className="shrink-0 rounded-xl border border-white/[0.07] bg-ink/50 px-3 py-2 text-center">
-            <p className="gradient-text font-mono text-xl font-bold">{scenarioProgressPct}%</p>
-            <p className="font-mono text-[10px] text-text-muted">{completedTasks}/{totalTasks}</p>
+          <div className="scenario-progress-summary shrink-0 rounded-lg border px-3 py-2 text-center">
+            <p className="font-display text-lg font-bold text-status-completed">{scenarioProgressPct}<span className="text-[10px]">%</span></p>
+            <p className="text-[10px] text-text-muted">{completedTasks}/{totalTasks}</p>
           </div>
         </div>
 
@@ -52,13 +51,13 @@ export default function ScenarioPanel({ scenario, simulation, progress }) {
       </div>
 
       {/* Workplace Context */}
-      <div className="p-4 border-b border-border bg-surface-2/50">
-        <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint mb-2">
+      <div className="workplace-context-panel border-b p-4">
+        <h3 className="font-display text-[10px] font-bold uppercase tracking-[.1em] text-text-faint mb-2">
           Workplace Context
         </h3>
-        <div className="prose prose-sm text-text-muted">
-          {scenario.workplace_context.split('\n').map((paragraph, i) => (
-            <p key={i} className="mb-2">{paragraph}</p>
+        <div className="space-y-2 text-xs leading-5 text-text-muted">
+          {(scenario.workplace_context || "Workplace context has not been provided for this scenario.").split('\n').filter(Boolean).map((paragraph, i) => (
+            <p key={i}>{paragraph}</p>
           ))}
         </div>
       </div>
@@ -66,7 +65,7 @@ export default function ScenarioPanel({ scenario, simulation, progress }) {
       {/* Objectives */}
       {scenario.objectives && scenario.objectives.length > 0 && (
         <div className="p-4 border-b border-border">
-          <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint mb-2">
+          <h3 className="font-display text-[10px] font-bold uppercase tracking-[.1em] text-text-faint mb-2">
             Objectives
           </h3>
           <ul className="space-y-1">
@@ -83,7 +82,7 @@ export default function ScenarioPanel({ scenario, simulation, progress }) {
       {/* Required Skills */}
       {scenario.required_skills && scenario.required_skills.length > 0 && (
         <div className="p-4 border-b border-border">
-          <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint mb-2">
+          <h3 className="font-display text-[10px] font-bold uppercase tracking-[.1em] text-text-faint mb-2">
             Required Skills
           </h3>
           <div className="flex flex-wrap gap-1">
@@ -100,10 +99,8 @@ export default function ScenarioPanel({ scenario, simulation, progress }) {
       )}
 
       {/* Task List for this Scenario */}
-      <div className="flex-1 p-4 overflow-y-auto">
-        <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-text-faint mb-3">
-          Scenario Tasks
-        </h3>
+      <div className="scenario-task-list min-h-0 min-w-0 flex-1 p-4 overflow-y-auto">
+        <div className="mb-3 flex items-center justify-between"><h3 className="font-display text-[10px] font-bold uppercase tracking-[.1em] text-text-faint">Scenario tasks</h3><span className="text-[10px] text-text-faint">{scenario.all_tasks?.length ?? "—"} total</span></div>
         <ul className="space-y-2">
           {scenario.all_tasks?.map((task) => (
             <ScenarioTaskItem
@@ -113,6 +110,7 @@ export default function ScenarioPanel({ scenario, simulation, progress }) {
               locked={task.locked}
             />
           ))}
+          {(!scenario.all_tasks || scenario.all_tasks.length === 0) && <li className="rounded-lg border border-dashed border-border bg-surface-3 px-3 py-4 text-center text-xs text-text-muted">No scenario tasks are available.</li>}
         </ul>
       </div>
     </div>
@@ -121,14 +119,14 @@ export default function ScenarioPanel({ scenario, simulation, progress }) {
 
 function ScenarioTaskItem({ task, isCurrent, locked }) {
   const statusColors = {
-    backlog: "bg-surface-2 text-text-muted",
+    backlog: "bg-surface-3 text-text-muted",
     todo: "bg-status-todo/10 text-status-todo",
     in_progress: "bg-status-todo/10 text-status-todo",
     submitted: "bg-status-review/10 text-status-review",
     under_review: "bg-status-review/10 text-status-review",
     completed: "bg-status-completed/10 text-status-completed",
-    changes_requested: "bg-status-blocked/10 text-status-blocked",
-    blocked: "bg-status-blocked/10 text-status-blocked",
+    changes_requested: "bg-status-progress/10 text-status-progress",
+    blocked: "bg-status-progress/10 text-status-progress",
   };
 
   return (
@@ -136,12 +134,12 @@ function ScenarioTaskItem({ task, isCurrent, locked }) {
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
       whileHover={locked ? undefined : { x: 3 }}
-      className={`rounded-xl border p-3 transition-all duration-200 ${
+      className={`scenario-task rounded-lg border p-3 transition-colors ${
         locked
-          ? "border-white/[0.04] bg-white/[0.01] opacity-55"
+          ? "scenario-task-locked opacity-60"
           : isCurrent
-            ? "border-brand-400/50 bg-gradient-to-r from-brand-500/[0.14] to-accent-cyan/[0.06] shadow-[0_0_28px_-10px_rgba(124,108,246,0.8)]"
-            : "border-white/[0.06] bg-white/[0.02] hover:border-brand-400/25"
+            ? "scenario-task-current border-brand-500/30 bg-brand-500/5"
+            : "border-border bg-white hover:border-brand-300"
       }`}
     >
       <div className="flex items-start gap-2">
@@ -153,10 +151,10 @@ function ScenarioTaskItem({ task, isCurrent, locked }) {
           <div className={`w-2 h-2 mt-2 rounded-full shrink-0 ${statusColors[task.status]?.replace("bg-", "bg-").replace("text-", "bg-") || "bg-surface-2"}`} />
         )}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className={`font-medium text-sm truncate ${locked ? "text-text-muted" : ""}`}>{task.title}</span>
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <span className={`min-w-0 flex-1 truncate font-medium text-xs ${locked ? "text-text-muted" : ""}`}>{task.title}</span>
             <span
-              className={`px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide ${statusColors[task.status]}`}
+              className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide ${statusColors[task.status]}`}
             >
               {task.status.replace("_", " ")}
             </span>
@@ -166,11 +164,11 @@ function ScenarioTaskItem({ task, isCurrent, locked }) {
               </span>
             )}
           </div>
-          <p className={`mt-1 text-xs truncate ${locked ? "text-text-faint" : "text-text-muted"}`}>{task.description}</p>
-          <div className="mt-1 flex items-center gap-3 text-xs text-text-faint">
-            {task.task_type && <span>{task.task_type}</span>}
+          <p className={`mt-1 text-[11px] leading-4 ${locked ? "text-text-faint" : "text-text-muted"}`}>{task.description}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-faint">
+            {task.task_type && <span>{task.task_type.replaceAll("_", " ")}</span>}
             {task.deadline && (
-              <span>Due: {new Date(task.deadline).toLocaleDateString()}</span>
+              <span>Due: {new Date(task.deadline).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
             )}
           </div>
         </div>

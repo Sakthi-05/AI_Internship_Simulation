@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -6,9 +7,9 @@ import {
 } from "recharts";
 import { useSimulation } from "../context/SimulationContext";
 import {
-  useCompany, useManager, useProject, useProjectState, useSprints, useBoard,
+  useCompany, useManager, useProject, useProjectState, useSprints, useBoard, useTimeline,
 } from "../hooks/useApi";
-import { STATUS_ORDER, STATUS_META } from "../lib/status";
+import { STATUS_ORDER, STATUS_META, PRIORITY_META } from "../lib/status";
 import LoadingScreen from "../components/LoadingScreen";
 
 export default function Dashboard() {
@@ -19,6 +20,7 @@ export default function Dashboard() {
   const { data: state } = useProjectState(simulation?.projectId);
   const { data: sprints } = useSprints(simulation?.projectId);
   const { data: board, isLoading: boardLoading, error: boardError, refetch: refetchBoard } = useBoard(simulation?.projectId, simulation?.id);
+  const { data: timeline } = useTimeline(simulation?.projectId);
 
   if (companyLoading || projectLoading || !company || !project) {
     if (companyLoading || projectLoading) return <LoadingScreen label="Loading dashboard" />;
@@ -32,10 +34,11 @@ export default function Dashboard() {
   const completedTasks = board?.completed?.length || 0;
   const completionPct = totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
+  const chartColors = { backlog: "#94A3B8", todo: "#2563EB", in_progress: "#D97706", submitted: "#8B5CF6", under_review: "#6366F1", blocked: "#F97373", completed: "#0D9488" };
   const distributionData = STATUS_ORDER.map((s) => ({
     name: STATUS_META[s].label,
     value: board?.[s]?.length || 0,
-    color: STATUS_META[s].color,
+    color: chartColors[s],
   })).filter((d) => d.value > 0);
 
   const burndownData = (sprints || []).map((s) => ({
@@ -44,78 +47,73 @@ export default function Dashboard() {
   }));
 
   const donutData = [
-    { name: "Completed", value: completedTasks, color: STATUS_META.completed.color },
-    { name: "Remaining", value: totalTasks - completedTasks, color: "var(--color-surface-3)" },
+    { name: "Completed", value: completedTasks, color: "#0D9488" },
+    { name: "Remaining", value: totalTasks - completedTasks, color: "#E5E7EB" },
   ];
 
   const velocity = totalTasks ? Math.round((completedTasks / Math.max(state?.current_sprint_number ?? 1, 1)) * 10) / 10 : 0;
+  const recentTasks = STATUS_ORDER.flatMap((status) => (board?.[status] || []).map((task) => ({ ...task, status })))
+    .filter((task) => task.status !== "completed")
+    .sort((a, b) => (a.sequence ?? Number.MAX_SAFE_INTEGER) - (b.sequence ?? Number.MAX_SAFE_INTEGER))
+    .slice(0, 4);
+  const recentActivity = [...(timeline || [])].slice(-5).reverse();
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 p-6">
+    <div className="dashboard-page mx-auto max-w-6xl space-y-5 p-6 sm:p-7">
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-        className="card overflow-hidden p-6"
+        className="dashboard-hero card overflow-hidden p-6 sm:p-7"
       >
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-brand-500/15 via-brand-500/[0.05] to-transparent" />
-        <div className="relative flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <p className="eyebrow">◈ Live internship dashboard</p>
-            <h1 className="mt-1.5 font-display text-2xl font-bold sm:text-3xl">
-              <span className="gradient-text">{project.title}</span>
-            </h1>
-            <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-text-muted">
-              <span className="font-medium text-text">{company.name}</span>
-              <span className="text-text-faint">·</span><span>{company.industry}</span>
-              <span className="text-text-faint">·</span><span>{company.size || "team"}</span>
-              <span className="text-text-faint">·</span>
-              <span className="chip chip-glow py-0.5!">{project.role}</span>
-              <span className="chip py-0.5! capitalize">{project.difficulty}</span>
+        <div className="hero-decoration" aria-hidden="true"><span/><span/><span/></div>
+        <div className="relative flex flex-wrap items-center justify-between gap-6">
+          <div className="hero-copy">
+            <p className="eyebrow"><span className="eyebrow-mark">✦</span> Internship overview</p>
+            <h1 className="mt-2 font-display text-2xl font-bold tracking-tight sm:text-3xl">{project.title}</h1>
+            <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-text-muted">
+              <span className="font-semibold text-text">{company.name}</span>
+              {company.industry && <><span className="text-text-faint">·</span><span>{company.industry}</span></>}
+              {company.size && <><span className="text-text-faint">·</span><span>{company.size}</span></>}
             </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="chip chip-glow">{project.role}</span>
+              <span className="chip capitalize">{project.difficulty} track</span>
+            </div>
             {(company.technology_stack || []).length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
+              <div className="mt-4 flex flex-wrap gap-1.5">
                 {company.technology_stack.map((t) => (
-                  <span key={t} className="chip font-mono text-[11px]!">⌁ {t}</span>
+                  <span key={t} className="tech-chip"><span className="tech-dot"/>{t}</span>
                 ))}
               </div>
             )}
           </div>
-          <div className="flex items-center gap-3">
-            <div className="text-right">
-              <p className="text-[11px] uppercase tracking-wider text-text-faint">Sprint</p>
-              <p className="font-mono text-2xl font-bold text-text">{state?.current_sprint_number ?? 1}<span className="text-sm text-text-faint"> / 4</span></p>
-            </div>
-            <div className="relative h-16 w-16">
+          <div className="hero-progress">
+            <div className="hero-progress-copy"><span className="hero-progress-label">Overall progress</span><strong>{completedTasks}<small> / {totalTasks} tasks</small></strong><span className="hero-progress-sprint">Sprint {state?.current_sprint_number ?? 1} <i>·</i> {sprints ? sprints.length : "—"} planned</span></div>
+            <div className="relative h-[92px] w-[92px] shrink-0">
               <svg viewBox="0 0 64 64" className="h-full w-full -rotate-90">
-                <circle cx="32" cy="32" r="26" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="7" />
+                <circle cx="32" cy="32" r="26" fill="none" stroke="#E5E7EB" strokeWidth="6" />
                 <motion.circle
                   cx="32" cy="32" r="26" fill="none"
-                  stroke="url(#dashRing)" strokeWidth="7" strokeLinecap="round"
+                  stroke="#2563EB" strokeWidth="6" strokeLinecap="round"
                   strokeDasharray={2 * Math.PI * 26}
                   initial={{ strokeDashoffset: 2 * Math.PI * 26 }}
                   animate={{ strokeDashoffset: 2 * Math.PI * 26 * (1 - completionPct / 100) }}
                   transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }}
-                  style={{ filter: "drop-shadow(0 0 6px rgba(124,108,246,0.8))" }}
+                  style={{ filter: "drop-shadow(0 2px 4px rgba(37,99,235,0.25))" }}
                 />
-                <defs>
-                  <linearGradient id="dashRing" x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0%" stopColor="#8b7cf6" />
-                    <stop offset="100%" stopColor="#46d8ff" />
-                  </linearGradient>
-                </defs>
               </svg>
-              <span className="absolute inset-0 flex items-center justify-center font-mono text-sm font-bold">{completionPct}%</span>
+              <span className="absolute inset-0 flex items-center justify-center font-mono text-[15px] font-bold">{completionPct}<small className="ml-0.5 text-[9px] font-semibold text-text-muted">%</small></span>
             </div>
           </div>
         </div>
       </motion.div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard index={0} icon="◈" label="Completion" value={`${completionPct}%`} accent="var(--color-status-completed)" glow="rgba(62,214,149,0.5)" />
-        <StatCard index={1} icon="✓" label="Tasks completed" value={`${completedTasks} / ${totalTasks}`} accent="var(--color-brand-300)" glow="rgba(139,124,246,0.5)" />
-        <StatCard index={2} icon="⚠" label="Missed deadlines" value={state?.missed_deadlines ?? 0} accent="var(--color-status-blocked)" glow="rgba(239,91,91,0.5)" />
-        <StatCard index={3} icon="⚡" label="Velocity / sprint" value={`${velocity}`} accent="var(--color-accent-cyan)" glow="rgba(70,216,255,0.45)" />
+        <StatCard index={0} icon="target" label="Completion" value={`${completionPct}%`} accent="#0D9488" hint="Tasks completed" />
+        <StatCard index={1} icon="check" label="Tasks completed" value={`${completedTasks} / ${totalTasks}`} accent="#4F46E5" hint="Across all sprints" />
+        <StatCard index={2} icon="alert" label="Missed deadlines" value={state?.missed_deadlines ?? 0} accent="#E76F51" hint="Needs attention" />
+        <StatCard index={3} icon="trend" label="Velocity / sprint" value={`${velocity}`} accent="#0891B2" hint="Completed per sprint" />
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -126,17 +124,11 @@ export default function Dashboard() {
           className="card card-hover p-5"
         >
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="font-display text-sm font-semibold text-text-muted">Completion</h2>
+            <div><h2 className="font-display text-sm font-semibold text-text">Task completion</h2><p className="mt-1 text-[11px] text-text-faint">Progress across your internship</p></div>
             <span className="chip font-mono text-[11px]!">{completionPct}%</span>
           </div>
           <ResponsiveContainer width="100%" height={180}>
             <PieChart>
-              <defs>
-                <linearGradient id="donutGlow" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stopColor="#8b7cf6" />
-                  <stop offset="100%" stopColor="#3ed695" />
-                </linearGradient>
-              </defs>
               <Pie
                 data={donutData}
                 dataKey="value"
@@ -147,8 +139,8 @@ export default function Dashboard() {
                 strokeWidth={0}
                 isAnimationActive
               >
-                <Cell fill="url(#donutGlow)" stroke="none" />
-                <Cell fill="rgba(255,255,255,0.07)" stroke="none" />
+                <Cell fill="#0D9488" stroke="none" />
+                <Cell fill="#E5E7EB" stroke="none" />
               </Pie>
               <Tooltip contentStyle={tooltipStyle} />
             </PieChart>
@@ -170,15 +162,15 @@ export default function Dashboard() {
           className="card card-hover p-5"
         >
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="font-display text-sm font-semibold text-text-muted">Task distribution</h2>
+            <div><h2 className="font-display text-sm font-semibold text-text">Task distribution</h2><p className="mt-1 text-[11px] text-text-faint">Current workflow by status</p></div>
             <span className="chip font-mono text-[11px]!">{totalTasks} total</span>
           </div>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={distributionData} layout="vertical" margin={{ left: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" horizontal={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F3" horizontal={false} />
               <XAxis type="number" hide />
               <YAxis type="category" dataKey="name" width={90} tick={{ fill: "var(--color-text-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(139,124,246,0.08)" }} />
+              <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "#F4F5F7" }} />
               <Bar dataKey="value" radius={[0, 6, 6, 0]} isAnimationActive animationDuration={900}>
                 {distributionData.map((d, i) => (
                   <Cell key={i} fill={d.color} />
@@ -195,37 +187,40 @@ export default function Dashboard() {
           className="card card-hover p-5"
         >
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="font-display text-sm font-semibold text-text-muted">Sprint trajectory</h2>
-            <span className="flex items-center gap-1.5 text-[11px] text-status-completed">
-              <span className="h-1.5 w-1.5 rounded-full bg-status-completed shadow-[0_0_8px_rgba(62,214,149,0.9)] animate-pulse-soft" />
-              live
-            </span>
+            <div><h2 className="font-display text-sm font-semibold text-text">Sprint trajectory</h2><p className="mt-1 text-[11px] text-text-faint">Status of planned sprints</p></div>
+            <span className="rounded-full bg-[#EEF2FF] px-2 py-1 text-[10px] font-semibold text-[#4F46E5]">{burndownData.length} sprints</span>
           </div>
           <ResponsiveContainer width="100%" height={220}>
             <LineChart data={burndownData}>
-              <defs>
-                <linearGradient id="sprintLine" x1="0" y1="0" x2="1" y2="0">
-                  <stop offset="0%" stopColor="#8b7cf6" />
-                  <stop offset="100%" stopColor="#46d8ff" />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F3" />
               <XAxis dataKey="name" tick={{ fill: "var(--color-text-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
               <YAxis hide />
               <Tooltip contentStyle={tooltipStyle} formatter={(v) => [v, "status"]} />
               <Line
                 type="monotone"
                 dataKey={(d) => (d.status === "completed" ? 2 : d.status === "active" ? 1 : 0)}
-                stroke="url(#sprintLine)"
-                strokeWidth={3}
-                dot={{ fill: "#46d8ff", r: 4, strokeWidth: 0, filter: undefined }}
-                activeDot={{ r: 6, fill: "#46d8ff", stroke: "#fff", strokeWidth: 2 }}
+                stroke="#6366F1"
+                strokeWidth={2.5}
+                dot={{ fill: "#06B6D4", r: 4, stroke: "#fff", strokeWidth: 2 }}
+                activeDot={{ r: 6, fill: "#6366F1", stroke: "#fff", strokeWidth: 2 }}
                 isAnimationActive
                 animationDuration={1000}
               />
             </LineChart>
           </ResponsiveContainer>
         </motion.div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.15fr_.85fr]">
+        <section className="card p-5">
+          <div className="mb-4 flex items-center justify-between gap-3"><div><p className="eyebrow">Your workload</p><h2 className="mt-1 font-display text-base font-semibold">Tasks in progress</h2><p className="mt-1 text-xs text-text-faint">A quick look at the next items on your board.</p></div><Link to="/board" className="btn-ghost">Open board <span aria-hidden="true">↗</span></Link></div>
+          {recentTasks.length ? <div className="dashboard-task-list">{recentTasks.map((task) => <article className="dashboard-task-row" key={task.id}><span className="task-status-marker" style={{ backgroundColor: chartColors[task.status] || "#94A3B8" }}/><div className="min-w-0 flex-1"><h3 className="truncate text-sm font-semibold">{task.title}</h3><p className="mt-1 text-[11px] text-text-faint">#{task.sequence} <span className="mx-1">·</span> {task.estimated_hours}h estimated</p></div><div className="flex shrink-0 flex-col items-end gap-1"><span className="task-status-pill" style={{ color: chartColors[task.status] || "#64748B", backgroundColor: `color-mix(in srgb, ${chartColors[task.status] || "#64748B"} 10%, white)` }}>{STATUS_META[task.status]?.label || task.status.replaceAll("_", " ")}</span><span className="text-[10px] text-text-faint">{PRIORITY_META[task.priority]?.label || "Priority not set"}</span></div></article>)}</div> : <p className="rounded-lg bg-surface-3 px-4 py-6 text-center text-sm text-text-muted">No open tasks are currently on your board.</p>}
+        </section>
+
+        <section className="card p-5">
+          <div className="mb-4"><p className="eyebrow">Latest updates</p><h2 className="mt-1 font-display text-base font-semibold">Activity timeline</h2><p className="mt-1 text-xs text-text-faint">Recent events from your internship workspace.</p></div>
+          {recentActivity.length ? <div className="dashboard-activity-list">{recentActivity.map((event, index) => <article className="dashboard-activity-row" key={`${event.kind}-${event.timestamp}-${index}`}><span className={`activity-marker activity-marker-${index % 4}`}><span/></span><div className="min-w-0 flex-1"><h3 className="truncate text-xs font-semibold">{event.title}</h3>{event.detail && <p className="mt-1 line-clamp-1 text-[11px] text-text-faint">{event.detail}</p>}<time className="mt-1 block text-[10px] text-text-faint">{event.timestamp ? new Date(event.timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}</time></div></article>)}</div> : <p className="rounded-lg bg-surface-3 px-4 py-6 text-center text-sm text-text-muted">Activity will appear here as you work through the simulation.</p>}
+        </section>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -239,7 +234,7 @@ export default function Dashboard() {
           <h2 className="eyebrow relative">Your manager</h2>
           {manager ? (
             <div className="relative mt-3 flex items-center gap-3 text-sm">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-accent-cyan font-display text-lg font-bold text-white shadow-[0_0_28px_-6px_rgba(124,108,246,0.9)]">
+              <div className="manager-avatar">
                 {manager.name?.[0] || "M"}
               </div>
               <div className="min-w-0">
@@ -260,8 +255,7 @@ export default function Dashboard() {
                 <motion.div
                   className="h-full rounded-full"
                   style={{
-                    background: "linear-gradient(90deg, #3ed695, #46d8ff)",
-                    boxShadow: "0 0 12px rgba(62,214,149,0.7)",
+                    background: "#0D9488",
                   }}
                   initial={{ width: 0 }}
                   animate={{ width: `${manager.satisfaction_score}%` }}
@@ -296,10 +290,10 @@ export default function Dashboard() {
                   <span
                     className={`absolute left-0 top-1.5 h-[16px] w-[16px] rounded-full border-2 ${
                       done
-                        ? "border-status-completed bg-status-completed shadow-[0_0_12px_rgba(62,214,149,0.9)]"
+                        ? "border-status-completed bg-status-completed"
                         : active
-                          ? "border-accent-cyan bg-accent-cyan/30 shadow-[0_0_12px_rgba(70,216,255,0.9)] animate-pulse-soft"
-                          : "border-white/20 bg-surface"
+                          ? "border-brand-500 bg-brand-500/20"
+                          : "border-border bg-surface"
                     }`}
                   />
                   <p className="font-semibold leading-tight">{sprint.name}</p>
@@ -327,9 +321,9 @@ export default function Dashboard() {
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: 0.5 + i * 0.05 }}
-                className="flex items-start gap-2.5 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-2 text-sm text-text-muted transition-colors hover:border-brand-400/25 hover:text-text"
+                className="objective-row flex items-start gap-2.5 rounded-xl border px-3 py-2 text-sm text-text-muted transition-colors hover:border-brand-400/25 hover:text-text"
               >
-                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500/40 to-accent-cyan/30 font-mono text-[10px] text-brand-200">
+                <span className="objective-number mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full font-mono text-[10px] text-brand-500">
                   {i + 1}
                 </span>
                 {o}
@@ -343,46 +337,40 @@ export default function Dashboard() {
 }
 
 const tooltipStyle = {
-  background: "rgba(20,27,48,0.95)",
-  border: "1px solid rgba(139,124,246,0.35)",
-  borderRadius: 12,
+  background: "#FFFFFF",
+  border: "1px solid #E5E7EB",
+  borderRadius: 10,
   fontSize: 12,
-  color: "var(--color-text)",
-  boxShadow: "0 16px 40px -12px rgba(0,0,0,0.8), 0 0 24px -8px rgba(124,108,246,0.5)",
-  backdropFilter: "blur(12px)",
+  color: "#1E293B",
+  boxShadow: "0 8px 24px rgba(15,23,42,0.12)",
 };
 
-function StatCard({ label, value, accent, glow, icon, index = 0 }) {
+function StatCard({ label, value, accent, icon, hint, index = 0 }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.06 * index, duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-      whileHover={{ y: -4 }}
-      className="card card-hover group overflow-hidden p-5"
+      transition={{ delay: 0.06 * index, duration: 0.28 }}
+      whileHover={{ y: -2 }}
+      className="dashboard-stat card card-hover group overflow-hidden p-4"
     >
-      <div
-        className="pointer-events-none absolute -right-8 -top-8 h-28 w-28 rounded-full opacity-20 blur-2xl transition-opacity duration-300 group-hover:opacity-45"
-        style={{ background: accent }}
-      />
-      <div className="relative flex items-center justify-between">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-faint">{label}</p>
-        <span
-          className="flex h-7 w-7 items-center justify-center rounded-lg text-sm"
-          style={{ color: accent, background: `color-mix(in srgb, ${accent} 14%, transparent)`, boxShadow: `0 0 16px -4px ${glow}` }}
-        >
-          {icon}
-        </span>
+      <div className="relative flex items-center gap-3">
+        <span className="stat-icon" style={{ color: accent, background: `color-mix(in srgb, ${accent} 12%, white)` }}><DashboardIcon name={icon}/></span>
+        <div className="min-w-0"><p className="text-[11px] font-medium text-text-muted">{label}</p>
+          <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 + 0.05 * index }} className="mt-1 font-display text-[25px] font-bold leading-none tracking-tight text-text">{value}</motion.p>
+          <p className="mt-1.5 text-[10px] text-text-faint">{hint}</p>
+        </div>
       </div>
-      <motion.p
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ delay: 0.15 + 0.06 * index }}
-        className="relative mt-2 font-mono text-[26px] font-bold leading-none"
-        style={{ color: accent, textShadow: `0 0 24px ${glow}` }}
-      >
-        {value}
-      </motion.p>
     </motion.div>
   );
+}
+
+function DashboardIcon({ name }) {
+  const paths = {
+    target: <><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/></>,
+    check: <><path d="m5 12 4 4L19 6"/><path d="M20 12a8 8 0 1 1-4.1-7"/></>,
+    alert: <><path d="M10.3 3.9 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4m0 3h.01"/></>,
+    trend: <><path d="m3 17 6-6 4 4 8-8"/><path d="M15 7h6v6"/></>,
+  };
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }

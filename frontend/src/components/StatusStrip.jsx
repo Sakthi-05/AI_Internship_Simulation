@@ -1,29 +1,16 @@
 import { moodColor, moodLabel } from "../lib/status";
 
-/**
- * The one memorable, deliberate visual choice for this app: a status strip
- * styled like a terminal prompt / CI build status line, because the whole
- * product simulates being a software engineer — this is the artifact those
- * users see every day. Everything else in the UI stays quiet by comparison.
- */
 export default function StatusStrip({ company, project, sprintNumber, managerScore, managerName }) {
   const path = company && project
     ? `${slugify(company.name)}/${slugify(project.title)}`
     : "no-active-simulation";
 
   return (
-    <div className="relative flex items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-white/[0.06] bg-ink/70 px-4 py-2 font-mono text-[13px] backdrop-blur-xl">
-      <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-brand-500/60 to-transparent" />
-      <span className="select-none rounded bg-gradient-to-r from-brand-500 to-accent-cyan bg-clip-text font-bold text-transparent">⬢ aiwse</span>
-      <span className="select-none text-text-faint">@sim</span>
-      <span className="select-none text-text-faint">:</span>
-      <span className="text-brand-300 drop-shadow-[0_0_8px_rgba(139,124,246,0.6)]">~/{path}</span>
-      {sprintNumber ? (
-        <span className="text-text-muted">
-          (sprint {sprintNumber}/4)
-        </span>
-      ) : null}
-      <span className="cursor-blink text-text">▍</span>
+    <div className="flex min-w-0 items-center gap-2 whitespace-nowrap text-xs">
+      <span className="font-semibold text-text">{company?.name || "Internship"}</span>
+      <span className="text-text-faint">/</span>
+      <span className="max-w-[300px] truncate text-text-muted">{project?.title || path}</span>
+      {sprintNumber ? <span className="rounded-md bg-surface-3 px-2 py-1 text-[10px] font-medium text-text-muted">Sprint {sprintNumber} / 4</span> : null}
 
       {managerScore != null && (
         <span className="ml-auto flex items-center gap-2 text-text-muted">
@@ -31,7 +18,7 @@ export default function StatusStrip({ company, project, sprintNumber, managerSco
             className="relative inline-flex h-2 w-2 rounded-full pulse-dot"
             style={{ backgroundColor: moodColor(managerScore), color: moodColor(managerScore) }}
           />
-          manager {managerName ? `${managerName} ` : ""}
+          {managerName ? `${managerName} · ` : "Manager · "}
           <span style={{ color: moodColor(managerScore) }}>{moodLabel(managerScore)}</span>
         </span>
       )}

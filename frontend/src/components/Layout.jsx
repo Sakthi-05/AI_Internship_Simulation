@@ -6,16 +6,15 @@ import { useCompany, useManager, useProject, useProjectState } from "../hooks/us
 import { useCompanyWebSocket } from "../hooks/useCompanyWebSocket";
 import StatusStrip from "./StatusStrip";
 import NotificationsBell from "./NotificationsBell";
-import AmbientBackground from "./AmbientBackground";
 
 const TABS = [
-  { to: "/simulation", label: "Simulation" },
-  { to: "/dashboard", label: "Dashboard" },
-  { to: "/board", label: "Board" },
-  { to: "/chat", label: "Chat" },
-  { to: "/timeline", label: "Timeline" },
-  { to: "/intelligence", label: "Intelligence" },
-  { to: "/admin", label: "Admin" },
+  { to: "/dashboard", label: "Overview", icon: "▦" },
+  { to: "/simulation", label: "Simulation", icon: "◉" },
+  { to: "/board", label: "Tasks", icon: "☷" },
+  { to: "/chat", label: "Messages", icon: "◌" },
+  { to: "/timeline", label: "Timeline", icon: "◷" },
+  { to: "/intelligence", label: "Reports & skills", icon: "⌁" },
+  { to: "/admin", label: "Faculty admin", icon: "⚙" },
 ];
 
 export default function Layout() {
@@ -36,74 +35,32 @@ export default function Layout() {
   };
 
   return (
-    <div className="relative flex h-screen flex-col text-text">
-      <AmbientBackground />
-      <div className="relative z-10">
-        <StatusStrip
-          company={company}
-          project={project}
-          sprintNumber={state?.current_sprint_number}
-          managerScore={state?.manager_satisfaction}
-          managerName={manager?.name}
-        />
-      </div>
-
-      <div className="relative z-10 flex items-center justify-between gap-3 border-b border-white/[0.06] bg-ink/60 px-4 backdrop-blur-xl">
-        <nav className="flex gap-0.5">
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <div className="brand-lockup"><span className="brand-mark">AI</span><span><strong>AI Internship</strong><small>Simulation platform</small></span></div>
+        <p className="sidebar-label">WORKSPACE</p>
+        <nav className="sidebar-nav" aria-label="Main navigation">
           {TABS.filter((tab) => tab.to !== "/admin" || auth?.role === "admin").map((tab) => (
-            <NavLink
-              key={tab.to}
-              to={tab.to}
-              className={({ isActive }) =>
-                `nav-tab ${isActive ? "nav-tab-active" : ""}`
-              }
-            >
-              {({ isActive }) => (
-                <span className="relative px-1 py-0.5">
-                  {tab.label}
-                  {isActive && (
-                    <motion.span
-                      layoutId="nav-active-glow"
-                      className="absolute inset-x-0 -bottom-[11px] h-[2px] rounded-full bg-gradient-to-r from-brand-400 via-brand-300 to-accent-cyan shadow-[0_0_12px_2px_rgba(124,108,246,0.7)]"
-                      transition={{ type: "spring", stiffness: 500, damping: 38 }}
-                    />
-                  )}
-                </span>
-              )}
+            <NavLink key={tab.to} to={tab.to} className={({ isActive }) => `sidebar-link ${isActive ? "sidebar-link-active" : ""}`}>
+              <span className="sidebar-icon" aria-hidden="true">{tab.icon}</span><span>{tab.label}</span>
             </NavLink>
           ))}
         </nav>
-        <div className="flex items-center gap-2.5 py-2 font-mono text-xs text-text-faint">
-          <NotificationsBell companyId={simulation?.companyId} />
-          <span className="hidden items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 sm:flex">
-            <span className="h-1.5 w-1.5 rounded-full bg-status-completed shadow-[0_0_8px_1px_rgba(62,214,149,0.9)] animate-pulse-soft" />
-            {auth?.studentId}
-          </span>
-          <button
-            onClick={handleNewSimulation}
-            className="rounded-lg border border-white/10 px-2.5 py-1 text-text-muted transition-all duration-200 hover:-translate-y-px hover:border-accent-pink/50 hover:text-accent-pink hover:shadow-[0_8px_20px_-10px_rgba(244,113,181,0.7)]"
-          >
-            + new simulation
-          </button>
-          <button onClick={logout} className="rounded-lg px-2 py-1 text-text-faint transition-colors hover:text-text-muted">
-            sign out
-          </button>
+        <div className="sidebar-bottom">
+          <div className="workspace-card"><span className="workspace-dot"/><div><strong>{company?.name || "Your workspace"}</strong><small>{project?.title || "Active internship"}</small></div></div>
+          <div className="profile-row"><span className="profile-avatar">{String(auth?.studentId || "U").slice(0, 1).toUpperCase()}</span><span className="profile-copy"><strong>{auth?.studentId || "Learner"}</strong><small>{auth?.role === "admin" ? "Faculty account" : "Student account"}</small></span><button className="signout-button" onClick={logout} aria-label="Sign out" title="Sign out">↗</button></div>
         </div>
-      </div>
-
-      <div className="relative z-10 flex-1 overflow-auto">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={location.pathname}
-            initial={{ opacity: 0, y: 14, scale: 0.998 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -10, scale: 0.999 }}
-            transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-            className="h-full"
-          >
-            <Outlet />
-          </motion.div>
-        </AnimatePresence>
+      </aside>
+      <div className="app-main">
+        <header className="app-topbar">
+          <div className="mobile-brand"><span className="brand-mark">AI</span><strong>AI Internship</strong></div>
+          <div className="topbar-context"><StatusStrip company={company} project={project} sprintNumber={state?.current_sprint_number} managerScore={state?.manager_satisfaction} managerName={manager?.name}/></div>
+          <div className="topbar-actions"><NotificationsBell companyId={simulation?.companyId}/><button onClick={handleNewSimulation} className="btn-secondary">+ New simulation</button></div>
+        </header>
+        <nav className="mobile-nav" aria-label="Main navigation">{TABS.filter((tab) => tab.to !== "/admin" || auth?.role === "admin").map((tab) => <NavLink key={tab.to} to={tab.to} className={({ isActive }) => `mobile-nav-link ${isActive ? "mobile-nav-active" : ""}`}>{tab.label}</NavLink>)}</nav>
+        <main className="app-content">
+          <AnimatePresence mode="wait"><motion.div key={location.pathname} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }} className="app-page"><Outlet/></motion.div></AnimatePresence>
+        </main>
       </div>
     </div>
   );
