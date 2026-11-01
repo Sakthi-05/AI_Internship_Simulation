@@ -23,15 +23,15 @@ export default function WorkplaceSimulation({
   const otherEvents = (events || []).filter((event) => event.id !== change?.id);
 
   return (
-    <div className="workplace-simulation-card card flex h-full min-h-[300px] flex-col overflow-hidden">
+    <div className="workplace-simulation-card card flex min-h-[300px] flex-col">
       <div className="workplace-simulation-header border-b p-4">
         <p className="eyebrow">Workplace context</p>
         <h3 className="mt-1 font-display text-sm font-bold">Manager updates</h3>
       </div>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="space-y-3 p-4">
         {!change && (
           <p className="text-sm text-text-muted">
-            Requirement changes appear here when you start a task. Communication and adaptability are assessed from what you write and what you do next.
+            Requirement changes appear here after you tell your manager how the work is going. Communication and adaptability are assessed from what you write and what you do next.
           </p>
         )}
         {change && phase !== "acknowledge" && (
@@ -61,6 +61,12 @@ export default function WorkplaceSimulation({
                 <p className="text-sm text-text">{change.response}</p>
               </div>
             )}
+            {(change.subsequent_actions || []).filter((item) => item.action === "adapted_work").map((item, index) => (
+              <div key={`${item.at || index}-${index}`}>
+                <p className="text-xs text-text-faint">Adaptation you recorded</p>
+                <p className="text-sm text-text">{item.detail}</p>
+              </div>
+            ))}
           </section>
         )}
         {phase === "reply" && (

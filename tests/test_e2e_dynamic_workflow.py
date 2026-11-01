@@ -574,9 +574,10 @@ def test_performance_trend_integration(db: Session, fresh_student, test_company,
 
 def test_contextual_adaptability_tied_to_task(db: Session, fresh_student, test_company, test_project):
     """Test that requirement changes are contextual to the current task."""
-    from app.models.simulation import Simulation, WorkflowEvent, WorkflowEventStatus, WorkflowEventType
+    from app.models.enums import WorkflowEventType
+    from app.models.simulation import Simulation, WorkflowEvent
     from app.models.project_state import ProjectState
-    from app.services.engines.workflow_engine import maybe_trigger_contextual_requirement_change
+    from app.services.workplace_scenarios import WorkplaceScenarioError, issue_requirement_change
     
     # Create simulation and task
     simulation = Simulation(
@@ -622,38 +623,21 @@ def test_contextual_adaptability_tied_to_task(db: Session, fresh_student, test_c
     db.add(task)
     db.flush()
     
-    # Try to trigger contextual requirement change
-    # This should only trigger if conditions are met (15% probability)
-    # We'll call it multiple times to test the logic path exists
-    triggered = False
-    for _ in range(20):  # Try 20 times to hit the 15% probability
-        result = asyncio.run(
-            maybe_trigger_contextual_requirement_change(
-                db, task, test_project, state, fresh_student
-            )
+    with pytest.raises(WorkplaceScenarioError):
+        issue_requirement_change(db, simulation, task, trigger_activity="task_in_progress")
+    assert db.execute(
+        select(WorkflowEvent).where(
+            WorkflowEvent.simulation_id == simulation.id,
+            WorkflowEvent.task_id == task.id,
         )
-        if result:
-            triggered = True
-            break
-    
-    # Verify the function exists and can be called
-    # Whether it triggers depends on random probability, which is correct behavior
-    print(f"✓ Contextual adaptability function exists and can be called (triggered: {triggered})")
-    
-    # Verify if triggered, the event is contextual to the task
-    if triggered:
-        events = db.execute(
-            select(WorkflowEvent).where(
-                WorkflowEvent.simulation_id == simulation.id,
-                WorkflowEvent.task_id == task.id
-            )
-        ).scalars().all()
-        
-        if events:
-            event = events[0]
-            assert event.event_type == WorkflowEventType.REQUIREMENT_CHANGE
-            assert "API" in event.description.lower() or "endpoint" in event.description.lower()
-            print(f"✓ Requirement change is contextual to task: {event.description}")
+    ).scalars().all() == []
+
+    event = issue_requirement_change(db, simulation, task, trigger_activity="approach_note")
+    again = issue_requirement_change(db, simulation, task, trigger_activity="manager_message")
+    assert event is not None
+    assert again is None
+    assert event.event_type == WorkflowEventType.REQUIREMENT_CHANGE
+    assert "API" in event.description.lower() or "endpoint" in event.description.lower()
 
 
 if __name__ == "__main__":

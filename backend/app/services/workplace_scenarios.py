@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.models.enums import MessageSenderType, WorkflowEventStatus, WorkflowEventType
+from app.models.enums import MessageSenderType, TaskStatus, WorkflowEventStatus, WorkflowEventType
 from app.models.manager import Manager
 from app.models.message import Message
 from app.models.simulation import Scenario, Simulation, WorkflowEvent
@@ -27,6 +28,16 @@ INSUFFICIENT = "insufficient_evidence"
 SCORED = "scored"
 
 _TIMER_TRIGGERS = {"timer", "elapsed", "schedule", "timeout", "interval"}
+# Opening a task or flipping it to in progress is not student work.
+_STATUS_ONLY_ACTIVITIES = {
+    "task_started",
+    "task_in_progress",
+    "in_progress",
+    "status_change",
+    "status_transition",
+    "mid_task_progress",
+    "task_progress",
+}
 _CHANGE_TOKENS = {"change", "requirement", "criteria", "adapt", "update", "validation", "invalid", "error"}
 _PLAN_TOKENS = {"will", "plan", "add", "update", "change", "adjust", "revise"}
 
@@ -51,9 +62,9 @@ SCENARIO_CATALOG: tuple[ScenarioSpec, ...] = (
     ScenarioSpec(
         REQUIREMENT_CHANGE,
         ("communication", "adaptability"),
-        "task_started",
+        "approach_note",
         True,
-        "A real task's acceptance criteria change after work has started.",
+        "Acceptance criteria change after the student records work on an in-progress task.",
     ),
     ScenarioSpec(
         "collaboration",
@@ -160,6 +171,27 @@ def _parse_time(value: Optional[str]) -> Optional[datetime]:
     return _aware(parsed)
 
 
+def find_requirement_change(db: Session, simulation: Simulation, task: Task) -> Optional[WorkflowEvent]:
+    """Return the open requirement change, or the earliest one when none is open."""
+    return _open_requirement_change(db, simulation, task) or _existing_requirement_change(db, simulation, task)
+
+
+def _open_requirement_change(db: Session, simulation: Simulation, task: Task) -> Optional[WorkflowEvent]:
+    return db.execute(
+        select(WorkflowEvent)
+        .where(
+            WorkflowEvent.simulation_id == simulation.id,
+            WorkflowEvent.task_id == task.id,
+            WorkflowEvent.event_type == WorkflowEventType.REQUIREMENT_CHANGE,
+            WorkflowEvent.status.in_([
+                WorkflowEventStatus.PENDING,
+                WorkflowEventStatus.ACKNOWLEDGED,
+            ]),
+        )
+        .order_by(WorkflowEvent.occurred_at)
+    ).scalars().first()
+
+
 def _existing_requirement_change(db: Session, simulation: Simulation, task: Task) -> Optional[WorkflowEvent]:
     return db.execute(
         select(WorkflowEvent)
@@ -173,10 +205,9 @@ def _existing_requirement_change(db: Session, simulation: Simulation, task: Task
 
 
 def _added_criterion(task: Task) -> str:
-    return (
-        f"Validate invalid input on '{task.title}' and return a clear error response, "
-        "including what already completed work must change."
-    )
+    from app.services.criteria_version_service import added_text_for_version
+
+    return added_text_for_version(task, 2)
 
 
 def issue_requirement_change(
@@ -187,30 +218,43 @@ def issue_requirement_change(
     trigger_activity: str,
     scenario: Optional[Scenario] = None,
 ) -> Optional[WorkflowEvent]:
-    """Persist one requirement change for this task and update its criteria.
+    """Persist one open requirement change and a new criteria version.
 
-    Returns the new event, or None when this task already has one. A timer
-    trigger is rejected before any row is written.
+    This is the only writer for requirement-change rows. Returns the new
+    event, or None when this task already has a pending or acknowledged
+    change. A resolved change stays in history and a later work activity
+    can create the next one. Task start, a bare in-progress transition,
+    and timer triggers are rejected before any row is written. The
+    simulation row is locked so concurrent callers share that decision.
     """
     activity = _require_activity(trigger_activity)
+    if activity in _STATUS_ONLY_ACTIVITIES:
+        raise WorkplaceScenarioError(
+            "Requirement changes follow recorded student work, not task start or a status change.",
+            400,
+        )
+    if task.status != TaskStatus.IN_PROGRESS:
+        raise WorkplaceScenarioError(
+            "A requirement change is issued only while the task is in progress.",
+            409,
+        )
     spec = _CATALOG_BY_KEY[REQUIREMENT_CHANGE]
     if not spec.implemented:
         raise WorkplaceScenarioError("requirement_change is not implemented", 501)
 
-    if _existing_requirement_change(db, simulation, task) is not None:
+    db.execute(
+        select(Simulation).where(Simulation.id == simulation.id).with_for_update()
+    )
+    if _open_requirement_change(db, simulation, task) is not None:
         return None
 
-    original = [str(item) for item in (task.acceptance_criteria or []) if str(item).strip()]
+    from app.services.criteria_version_service import plan_next_change, publish_criteria_version, required_texts
+
+    original = required_texts(db, task)
     if not original:
         original = [f"Complete {task.title} as originally specified"]
-    added = _added_criterion(task)
-    if added not in original:
-        task.acceptance_criteria = original + [added]
-    task_meta = dict(task.task_metadata or {})
-    task.task_metadata = task_meta
-    flag_modified(task, "acceptance_criteria")
-    flag_modified(task, "task_metadata")
-
+    plan = plan_next_change(db, task, original)
+    added = plan["added"]
     event = WorkflowEvent(
         simulation_id=simulation.id,
         task_id=task.id,
@@ -240,15 +284,45 @@ def issue_requirement_change(
             "actions": [],
         },
     )
-    db.add(event)
-    db.add(task)
-    db.flush()
-    task_meta["requirement_change_event_id"] = str(event.id)
-    task.task_metadata = task_meta
-    flag_modified(task, "task_metadata")
-    db.add(task)
-    db.flush()
+    try:
+        with db.begin_nested():
+            db.add(event)
+            db.flush()
+            publish_criteria_version(db, task, event, plan)
+            task_meta = dict(task.task_metadata or {})
+            task_meta["requirement_change_event_id"] = str(event.id)
+            task.task_metadata = task_meta
+            flag_modified(task, "task_metadata")
+            db.add(task)
+            db.flush()
+    except IntegrityError:
+        return _open_requirement_change(db, simulation, task) or _existing_requirement_change(db, simulation, task)
     return event
+
+
+async def announce_requirement_change(db: Session, simulation: Simulation, event: Optional[WorkflowEvent]) -> None:
+    """Publish the project notification for a requirement change that was just created."""
+    if event is None:
+        return
+    from app.models.enums import EventType
+    from app.models.project import Project
+    from app.services.engines.events_engine import trigger_event
+
+    project = db.get(Project, simulation.project_id)
+    if project is None:
+        return
+    await trigger_event(
+        db,
+        project,
+        EventType.REQUIREMENT_CHANGE,
+        f"Requirement change for '{event.title}': {event.updated_requirement}",
+        {
+            "task_id": str(event.task_id) if event.task_id else None,
+            "event_id": str(event.id),
+            "original": event.original_requirement,
+            "updated": event.updated_requirement,
+        },
+    )
 
 
 def start_scenario(key: str) -> ScenarioSpec:
@@ -305,7 +379,10 @@ def record_requirement_reply(
 
     event.response = text
     event.responded_at = datetime.now(timezone.utc)
-    event.status = WorkflowEventStatus.RESOLVED
+    # A reply records communication. The event stays acknowledged until a later
+    # action is stored and adaptability has been evaluated from it.
+    if _status_value(event) != WorkflowEventStatus.ACKNOWLEDGED.value:
+        event.status = WorkflowEventStatus.ACKNOWLEDGED
     metadata = _event_metadata(event)
     if not metadata.get("student_message_id"):
         message = Message(
@@ -366,6 +443,7 @@ def record_subsequent_action(
     db.add(event)
     db.flush()
     assessment = assess_requirement_change(db, simulation, task, event, student_id)
+    _resolve_when_adaptation_scored(db, event, assessment)
     payload = serialize_workflow_event(db, event, task)
     payload["assessment"] = assessment
     return payload
@@ -396,7 +474,23 @@ def record_task_submission_action(
     _save_metadata(event, metadata)
     db.add(event)
     db.flush()
-    assess_requirement_change(db, simulation, task, event, student_id)
+    assessment = assess_requirement_change(db, simulation, task, event, student_id)
+    _resolve_when_adaptation_scored(db, event, assessment)
+
+
+def _resolve_when_adaptation_scored(db: Session, event: WorkflowEvent, assessment: Dict[str, Any]) -> None:
+    """Resolve only after an adaptation was saved and adaptability was scored."""
+    actions = list(_event_metadata(event).get("actions") or [])
+    if not any(item.get("action") == "adapted_work" for item in actions):
+        return
+    adaptability = (assessment or {}).get("adaptability") or {}
+    if adaptability.get("status") != SCORED:
+        return
+    if _status_value(event) == WorkflowEventStatus.RESOLVED.value:
+        return
+    event.status = WorkflowEventStatus.RESOLVED
+    db.add(event)
+    db.flush()
 
 
 def assess_requirement_change(
@@ -552,6 +646,14 @@ def assessment_for_event(db: Session, event: WorkflowEvent) -> Dict[str, Any]:
     }
 
 
+def _serialized_criteria(db: Session, task: Optional[Task]) -> List[str]:
+    if task is None:
+        return []
+    from app.services.criteria_version_service import required_texts
+
+    return required_texts(db, task)
+
+
 def serialize_workflow_event(db: Session, event: WorkflowEvent, task: Optional[Task] = None) -> Dict[str, Any]:
     metadata = _event_metadata(event)
     scenario_key = metadata.get("scenario_key")
@@ -572,7 +674,9 @@ def serialize_workflow_event(db: Session, event: WorkflowEvent, task: Optional[T
         "updated_requirement": event.updated_requirement,
         "original_criteria": metadata.get("original_criteria") or [],
         "added_criterion": metadata.get("added_criterion") or event.updated_requirement,
-        "acceptance_criteria": list(task.acceptance_criteria or []) if task is not None else [],
+        "criteria_version_id": metadata.get("criteria_version_id"),
+        "criteria_version_number": metadata.get("criteria_version_number"),
+        "acceptance_criteria": _serialized_criteria(db, task),
         "acknowledged": status != WorkflowEventStatus.PENDING.value,
         "manager_message": metadata.get("manager_message"),
         "responded": event.response is not None,
@@ -593,9 +697,8 @@ def workplace_phase(event: Dict[str, Any]) -> str:
         return "acknowledge"
     if not event.get("response"):
         return "reply"
-    adaptability = (event.get("assessment") or {}).get("adaptability") or {}
     described = any(item.get("action") == "adapted_work" for item in (event.get("subsequent_actions") or []))
-    if adaptability.get("status") != SCORED and not described:
+    if not described:
         return "adapt"
     return "assessed"
 

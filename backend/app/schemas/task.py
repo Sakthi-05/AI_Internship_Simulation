@@ -32,6 +32,7 @@ class TaskRead(BaseModel):
     generation_reason: Optional[str] = None
     performance_trend_at_generation: Optional[str] = None
     dependency_details: List[dict] = []
+    criteria_version: Optional[dict] = None
 
 
 class TaskStatusUpdate(BaseModel):

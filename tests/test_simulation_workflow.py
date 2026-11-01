@@ -40,7 +40,7 @@ from app.models.enums import (
 )
 
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 @pytest.fixture(scope="session", autouse=True)
 def _setup_database():
@@ -365,6 +365,10 @@ class TestRequirementChangeEvent:
             scenario = db.get(Scenario, uuid.UUID(scenario_id))
             
             import asyncio
+            from app.models.enums import TaskStatus
+            task.status = TaskStatus.IN_PROGRESS
+            db.add(task)
+            db.flush()
             event = asyncio.get_event_loop().run_until_complete(
                 trigger_requirement_change_event(
                     db, simulation, task, scenario,
@@ -373,12 +377,29 @@ class TestRequirementChangeEvent:
                     trigger_condition="mid_task_progress",
                 )
             )
-            
+            duplicate = asyncio.get_event_loop().run_until_complete(
+                trigger_requirement_change_event(
+                    db, simulation, task, scenario,
+                    original_requirement="Another original",
+                    updated_requirement="Another update",
+                    trigger_condition="recorded_work",
+                )
+            )
+
             assert event is not None
+            assert duplicate.id == event.id
             assert event.event_type == WorkflowEventType.REQUIREMENT_CHANGE
-            assert event.original_requirement == "Build a simple API"
-            assert event.updated_requirement == "Build a paginated API with filtering"
+            assert event.updated_requirement in (task.acceptance_criteria or [])
+            assert event.original_requirement != "Build a simple API"
             assert event.status == "pending"
+            stored = db.execute(
+                select(WorkflowEvent).where(
+                    WorkflowEvent.simulation_id == simulation.id,
+                    WorkflowEvent.task_id == task.id,
+                    WorkflowEvent.event_type == WorkflowEventType.REQUIREMENT_CHANGE,
+                )
+            ).scalars().all()
+            assert len(stored) == 1
             
             db.commit()
         finally:
@@ -434,7 +455,7 @@ class TestEventResponse:
     def test_respond_to_event(self, client, auth_headers):
         """Test: Can respond to a workflow event."""
         from app.services.engines.workflow_events_engine import (
-            trigger_requirement_change_event,
+            trigger_deadline_warning_event,
             respond_to_workflow_event,
         )
         from app.core.database import SessionLocal
@@ -455,10 +476,9 @@ class TestEventResponse:
             
             import asyncio
             event = asyncio.get_event_loop().run_until_complete(
-                trigger_requirement_change_event(
+                trigger_deadline_warning_event(
                     db, simulation, task, scenario,
-                    original_requirement="Build API",
-                    updated_requirement="Build paginated API",
+                    remaining_minutes=5,
                 )
             )
             db.commit()

@@ -93,6 +93,11 @@ def _to_task_read(task: Task, db: Session) -> TaskRead:
     data.recommended_team_role = metadata.get("recommended_team_role")
     data.generation_reason = metadata.get("generation_reason")
     data.performance_trend_at_generation = metadata.get("performance_trend_at_generation")
+    from app.services.criteria_version_service import criteria_view
+
+    view = criteria_view(db, task)
+    data.acceptance_criteria = view["acceptance_criteria"]
+    data.criteria_version = view["criteria_version"]
     
     # Add dependency details (titles of prerequisite tasks)
     if dep_ids:
@@ -288,19 +293,6 @@ async def update_task_status(
     ).scalar_one_or_none()
 
     _sync_project_state(db, task, previous_status, payload.status)
-
-    if payload.status == TaskStatus.IN_PROGRESS and previous_status != TaskStatus.IN_PROGRESS:
-        from app.services.engines.workflow_engine import maybe_trigger_contextual_requirement_change
-        try:
-            await maybe_trigger_contextual_requirement_change(
-                db, task, project, state, user.student_id
-            )
-        except Exception as exc:
-            import logging as _logging
-            _logging.getLogger("workflow").warning(
-                "Failed to trigger contextual requirement change task_id=%s: %s",
-                task.id, exc, exc_info=True,
-            )
 
     # Log activity
     action = get_transition_action(previous_status, payload.status)

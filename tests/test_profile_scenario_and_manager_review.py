@@ -85,8 +85,12 @@ async def test_profile_generation_links_a_scenario_for_workflow_events(client):
     try:
         from app.models.simulation import Simulation
         from app.models.task import Task
+        from app.models.enums import TaskStatus
         simulation = db.get(Simulation, simulation_id)
         task = db.get(Task, payload["all_tasks"][0]["task_id"])
+        task.status = TaskStatus.IN_PROGRESS
+        db.add(task)
+        db.flush()
         linked = db.get(Scenario, payload["scenario_id"])
         event = await trigger_requirement_change_event(
             db, simulation, task, linked, "Ship the original API.", "Also document the error cases.",

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { criteriaLines, criteriaStateLabel, earlierCriteria } from "./simulation/criteriaDisplay";
 import { STATUS_META, PRIORITY_META } from "../lib/status";
 import { useReportBug } from "../hooks/useApi";
 import { useSimulation } from "../context/SimulationContext";
@@ -60,10 +61,23 @@ export default function TaskDetailDrawer({ task, allTasks, onClose, onUpdateStat
 
         <p className="mt-4 text-sm leading-relaxed text-text-muted">{task.description}</p>
 
-        <Section title="Acceptance criteria">
+        <Section title={task.criteria_version?.active_version_number ? `Acceptance criteria · version ${task.criteria_version.active_version_number}` : "Acceptance criteria"}>
           <ul className="list-inside list-disc space-y-1 text-sm text-text-muted">
-            {task.acceptance_criteria.map((c) => <li key={c}>{c}</li>)}
+            {criteriaLines(task).map((criterion) => (
+              <li key={criterion.text}>
+                {criterion.text}
+                {task.criteria_version ? <span className="ml-2 text-xs uppercase tracking-wide text-text-faint">{criteriaStateLabel(criterion.state)}</span> : null}
+              </li>
+            ))}
           </ul>
+          {earlierCriteria(task).map((version) => (
+            <div key={version.versionNumber} className="mt-3 text-sm text-text-muted">
+              <p className="text-xs font-bold uppercase tracking-wide text-text-faint">Version {version.versionNumber} · Superseded</p>
+              <ul className="list-inside list-disc">
+                {version.items.map((text) => <li key={text}>{text}</li>)}
+              </ul>
+            </div>
+          ))}
         </Section>
 
         <Section title="Details">

@@ -29,7 +29,10 @@ class SubmissionService:
         files: Optional[List[Dict[str, Any]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        metadata = metadata or {}
+        metadata = dict(metadata or {})
+        from app.services.criteria_version_service import criteria_identity
+
+        metadata["acceptance_criteria_version"] = criteria_identity(db, task)
         files = files or []
 
         try:

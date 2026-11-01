@@ -24,3 +24,4 @@ from app.models.assessment import (  # noqa: F401
     StudentSkill,
 )
 from app.models.soft_skill import SoftSkillEvidence  # noqa: F401
+from app.models.criteria_version import AcceptanceCriteriaVersion  # noqa: F401

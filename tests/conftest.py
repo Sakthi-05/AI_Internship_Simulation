@@ -20,6 +20,19 @@ from app.main import app  # noqa: E402
 def _setup_database():
     """Create a clean schema once per test session against a real Postgres DB."""
     Base.metadata.create_all(bind=app_engine)
+    # A leftover test schema can still have the one-row requirement-change
+    # index. Swap it for the open-event index without dropping stored rows.
+    with app_engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS uq_workflow_events_one_requirement_change"))
+        conn.execute(text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_events_one_open_requirement_change
+            ON workflow_events (simulation_id, task_id)
+            WHERE event_type = 'REQUIREMENT_CHANGE'
+              AND status IN ('pending', 'acknowledged')
+              AND task_id IS NOT NULL
+            """
+        ))
     # Review-failure support used SQL ALTER TYPE on migrated databases; the
     # test schema is built with create_all(), which never extends an existing
     # enum type. Mirror the migration so FAILED reviews can be persisted.

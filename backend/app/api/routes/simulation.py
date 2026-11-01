@@ -29,6 +29,7 @@ from app.services.engines.simulation_task_state_machine import (
 from app.services.submission.submission_service import SubmissionService
 from app.services.file_storage import FileValidationError
 from app.services.activity_log_service import log_activity
+from app.services.criteria_version_service import criteria_identity, criteria_view
 from app.services.simulation.interaction_history_service import (
     list_interactions,
     record_interaction,
@@ -269,7 +270,8 @@ def get_simulation(
             "difficulty": current_task.difficulty.value if current_task.difficulty else simulation.difficulty.value,
             "task_type": current_task.task_type.value if current_task.task_type else "coding",
             "required_skills": simulation.project.technology_stack if simulation.project else [],
-            "expected_output": current_task.acceptance_criteria,
+            "expected_output": criteria_view(db, current_task)["expected_output"],
+            "criteria_version": criteria_view(db, current_task)["criteria_version"],
             "deadline": current_task.deadline.isoformat() if current_task.deadline else None,
             "status": current_task.status.value,
             "started_at": current_task.started_at.isoformat() if current_task.started_at else None,
@@ -654,7 +656,8 @@ def get_current_scenario(
             "difficulty": scenario.difficulty.value,
             "task_type": current_task.task_type.value if current_task.task_type else "coding",
             "required_skills": scenario.required_skills,
-            "expected_output": current_task.acceptance_criteria,
+            "expected_output": criteria_view(db, current_task)["expected_output"],
+            "criteria_version": criteria_view(db, current_task)["criteria_version"],
             "deadline": current_task.deadline.isoformat() if current_task.deadline else None,
             "status": current_task.status.value,
             "started_at": current_task.started_at.isoformat() if current_task.started_at else None,
@@ -764,7 +767,8 @@ def get_simulation_tasks(
                 "started_at": task.started_at.isoformat() if task.started_at else None,
                 "completed_at": task.completed_at.isoformat() if task.completed_at else None,
                 "estimated_hours": task.estimated_hours,
-                "acceptance_criteria": task.acceptance_criteria,
+                "acceptance_criteria": criteria_view(db, task)["acceptance_criteria"],
+                "criteria_version": criteria_view(db, task)["criteria_version"],
                 "is_current": is_current,
                 "locked": locked,
             })
@@ -935,7 +939,8 @@ async def get_current_task(
         "difficulty": task.difficulty.value if task.difficulty else (current_scenario.difficulty.value if current_scenario else "intermediate"),
         "task_type": task.task_type.value if task.task_type else "coding",
         "required_skills": current_scenario.required_skills if current_scenario else [],
-        "expected_output": task.acceptance_criteria,
+        "expected_output": criteria_view(db, task)["expected_output"],
+        "criteria_version": criteria_view(db, task)["criteria_version"],
         "deadline": task.deadline.isoformat() if task.deadline else None,
         "status": task.status.value,
         "started_at": task.started_at.isoformat() if task.started_at else None,
@@ -1070,27 +1075,7 @@ async def start_simulation_task(
         metadata={"task_title": task.title},
     )
     
-    current_scenario = None
-    if simulation.current_scenario_id:
-        current_scenario = db.get(Scenario, simulation.current_scenario_id)
-
-    from app.services.workplace_scenarios import WorkplaceScenarioError, issue_requirement_change
-    try:
-        requirement_event = issue_requirement_change(
-            db,
-            simulation,
-            task,
-            trigger_activity="task_started",
-            scenario=current_scenario,
-        )
-    except WorkplaceScenarioError:
-        requirement_event = None
-        import logging as _logging
-        _logging.getLogger("aiwse.simulation").warning(
-            "Requirement change was not issued for task %s", task.id, exc_info=True
-        )
-
-    # Trigger TASK_STARTED event
+    # Trigger TASK_STARTED event. A requirement change is not part of start.
     from app.services.engines.events_engine import trigger_event
     from app.models.enums import EventType
     project = db.get(Project, simulation.project_id)
@@ -1102,19 +1087,6 @@ async def start_simulation_task(
             f"Task '{task.title}' started",
             {"task_id": str(task.id), "task_title": task.title},
         )
-        if requirement_event is not None:
-            await trigger_event(
-                db,
-                project,
-                EventType.REQUIREMENT_CHANGE,
-                f"Requirement change for '{task.title}': {requirement_event.updated_requirement}",
-                {
-                    "task_id": str(task.id),
-                    "event_id": str(requirement_event.id),
-                    "original": requirement_event.original_requirement,
-                    "updated": requirement_event.updated_requirement,
-                },
-            )
 
     existing_checkin = db.execute(
         select(WorkflowEvent.id).where(
@@ -1188,7 +1160,8 @@ async def start_simulation_task(
         "difficulty": task.difficulty.value if task.difficulty else (current_scenario.difficulty.value if current_scenario else "intermediate"),
         "task_type": task.task_type.value if task.task_type else "coding",
         "required_skills": current_scenario.required_skills if current_scenario else [],
-        "expected_output": task.acceptance_criteria,
+        "expected_output": criteria_view(db, task)["expected_output"],
+        "criteria_version": criteria_view(db, task)["criteria_version"],
         "deadline": task.deadline.isoformat() if task.deadline else None,
         "status": task.status.value,
         "started_at": task.started_at.isoformat() if task.started_at else None,
@@ -1512,7 +1485,8 @@ async def submit_simulation_task(
         "task_difficulty": task.difficulty.value if task.difficulty else (current_scenario.difficulty.value if current_scenario else "intermediate"),
         "task_type": task.task_type.value if task.task_type else "coding",
         "required_skills": current_scenario.required_skills if current_scenario else [],
-        "acceptance_criteria": task.acceptance_criteria,
+        "acceptance_criteria": criteria_view(db, task)["acceptance_criteria"],
+        "acceptance_criteria_version": criteria_identity(db, task),
         "task_state_history": [
             {"status": "TODO", "timestamp": task.started_at.isoformat() if task.started_at else None},
             {"status": "IN_PROGRESS", "timestamp": task.started_at.isoformat() if task.started_at else None},
@@ -1665,6 +1639,23 @@ async def respond_to_simulation_event(
         },
     )
     
+    if (
+        updated_event.event_type == WorkflowEventType.STAKEHOLDER_MESSAGE
+        and updated_event.trigger_condition == "task_started"
+        and updated_event.task_id is not None
+    ):
+        work_task = db.get(Task, updated_event.task_id)
+        if work_task is not None and work_task.status == TaskStatus.IN_PROGRESS:
+            from app.services.workplace_scenarios import announce_requirement_change, issue_requirement_change
+            created = issue_requirement_change(
+                db,
+                simulation,
+                work_task,
+                trigger_activity="approach_note",
+                scenario=db.get(Scenario, updated_event.scenario_id) if updated_event.scenario_id else None,
+            )
+            await announce_requirement_change(db, simulation, created)
+
     db.commit()
     db.refresh(updated_event)
     
@@ -1903,7 +1894,8 @@ async def complete_simulation_task(
             "difficulty": next_task.difficulty.value if next_task.difficulty else simulation.difficulty.value,
             "task_type": next_task.task_type.value if next_task.task_type else "coding",
             "required_skills": simulation.project.technology_stack if simulation.project else [],
-            "expected_output": next_task.acceptance_criteria,
+            "expected_output": criteria_view(db, next_task)["expected_output"],
+            "criteria_version": criteria_view(db, next_task)["criteria_version"],
             "deadline": next_task.deadline.isoformat() if next_task.deadline else None,
             "status": next_task.status.value,
             "estimated_hours": next_task.estimated_hours,

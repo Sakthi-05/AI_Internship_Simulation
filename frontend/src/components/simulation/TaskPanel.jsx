@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
+import { criteriaLines, criteriaStateLabel, earlierCriteria } from "./criteriaDisplay";
 import SubmissionModal from "./SubmissionModal";
 import CodeEditor from "./CodeEditor";
 import DiffViewer from "./DiffViewer";
@@ -196,14 +197,17 @@ export default function TaskPanel({
           </div>
         </section>
 
-        {task.expected_output && task.expected_output.length > 0 && (
+        {criteriaLines(task).length > 0 && (
           <section>
             <h3 className="mb-3 flex items-center gap-2 font-display text-xs font-bold uppercase tracking-[0.14em] text-text-faint">
               <span className="flex h-5 w-5 items-center justify-center rounded-md bg-status-completed/15 text-[11px] text-status-completed">✓</span>
               Acceptance criteria
+              {task.criteria_version?.active_version_number ? (
+                <span className="normal-case tracking-normal text-text-faint">version {task.criteria_version.active_version_number}</span>
+              ) : null}
             </h3>
             <ul className="space-y-2">
-              {task.expected_output.map((criterion, i) => (
+              {criteriaLines(task).map((criterion, i) => (
                 <motion.li
                   key={i}
                   initial={{ opacity: 0, x: -8 }}
@@ -212,10 +216,27 @@ export default function TaskPanel({
                   className="acceptance-criterion flex items-start gap-2.5 rounded-lg border p-3 transition-colors hover:border-status-completed/30 hover:bg-status-completed/[0.04]"
                 >
                   <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-status-completed/10 text-[11px] font-bold text-status-completed">✓</span>
-                  <span className="text-sm text-text">{criterion}</span>
+                  <span className="text-sm text-text">
+                    {criterion.text}
+                    {task.criteria_version ? (
+                      <span className="ml-2 text-xs uppercase tracking-wide text-text-faint">{criteriaStateLabel(criterion.state)}</span>
+                    ) : null}
+                  </span>
                 </motion.li>
               ))}
             </ul>
+            {earlierCriteria(task).length > 0 && (
+              <div className="mt-3 space-y-2">
+                {earlierCriteria(task).map((version) => (
+                  <div key={version.versionNumber} className="rounded-lg border border-dashed p-3 text-sm text-text-muted">
+                    <p className="mb-1 text-xs font-bold uppercase tracking-wide text-text-faint">Version {version.versionNumber} · Superseded</p>
+                    <ul className="list-inside list-disc">
+                      {version.items.map((text) => <li key={text}>{text}</li>)}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         )}
 

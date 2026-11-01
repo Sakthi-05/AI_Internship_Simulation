@@ -125,6 +125,29 @@ async def send_manager_message(
     db.add(state)
     log_activity(db, company_id, actor=user.student_id, action="chat:manager", detail=payload.content[:200])
 
+    from app.models.enums import SimulationStatus
+    from app.models.simulation import Simulation
+    from app.models.task import Task
+    from app.services.workplace_scenarios import announce_requirement_change, issue_requirement_change
+
+    simulation = db.execute(
+        select(Simulation).where(
+            Simulation.project_id == project.id,
+            Simulation.student_id == user.student_id,
+            Simulation.status == SimulationStatus.IN_PROGRESS,
+        )
+    ).scalars().first()
+    if simulation is not None and simulation.current_task_id is not None:
+        work_task = db.get(Task, simulation.current_task_id)
+        if work_task is not None and work_task.status == TaskStatus.IN_PROGRESS:
+            created = issue_requirement_change(
+                db,
+                simulation,
+                work_task,
+                trigger_activity="manager_message",
+            )
+            await announce_requirement_change(db, simulation, created)
+
     db.commit()
     db.refresh(student_msg)
     db.refresh(reply_msg)

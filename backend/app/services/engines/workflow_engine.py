@@ -7,16 +7,16 @@ route (on completion, on missed deadline) and from the bug-report route.
 Every rule here reads real state and writes real state + a real Event —
 nothing here is decorative.
 
-FEATURE 14: Contextual Adaptability tied to real task.
-Requirement changes are triggered based on actual task context and project state,
-not random scenarios. Changes are relevant to the current task being worked on.
+Requirement changes are not created here. Task start and in-progress
+transitions do not issue them. The workplace scenario writer does that after
+the student records work on the task.
 """
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import EventType, SimulationStatus, TaskStatus
+from app.models.enums import EventType, TaskStatus
 from app.models.project import Project
 from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
@@ -107,59 +107,3 @@ async def report_bug(db: Session, project: Project, state: ProjectState, descrip
         )
 
     db.commit()
-
-
-async def maybe_trigger_contextual_requirement_change(
-    db: Session,
-    task: Task,
-    project: Project,
-    state: ProjectState,
-    student_id: str,
-) -> bool:
-    """Issue one requirement change when the student is actually working the task.
-
-    The change is tied to this task, updates its acceptance criteria, and is
-    skipped when one already exists. Elapsed time alone never creates it.
-    """
-    if task.status != TaskStatus.IN_PROGRESS:
-        return False
-
-    from app.models.simulation import Simulation
-    from app.services.workplace_scenarios import issue_requirement_change
-
-    simulation = db.execute(
-        select(Simulation).where(
-            Simulation.project_id == project.id,
-            Simulation.student_id == student_id,
-            Simulation.status == SimulationStatus.IN_PROGRESS,
-        )
-    ).scalars().first()
-    if not simulation:
-        return False
-
-    event = issue_requirement_change(
-        db,
-        simulation,
-        task,
-        trigger_activity="task_in_progress",
-    )
-    if event is None:
-        return False
-
-    await trigger_event(
-        db,
-        project,
-        EventType.REQUIREMENT_CHANGE,
-        f"Contextual requirement change for task '{task.title}': {event.updated_requirement}",
-        {
-            "task_id": str(task.id),
-            "event_id": str(event.id),
-            "original": event.original_requirement,
-            "updated": event.updated_requirement,
-        },
-    )
-    if state is not None:
-        state.stress_level = min(100, (state.stress_level or 0) + 5)
-        db.add(state)
-    db.commit()
-    return True

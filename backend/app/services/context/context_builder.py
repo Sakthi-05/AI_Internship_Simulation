@@ -11,6 +11,15 @@ from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
 from app.models.submission import Submission, SubmissionVersion
 from app.models.task import Task
+from app.services.criteria_version_service import criteria_identity, required_texts
+
+
+def _review_criteria(db: Session, task: Task) -> List[str]:
+    return required_texts(db, task)
+
+
+def _criteria_identity(db: Session, task: Task) -> Dict[str, Any]:
+    return criteria_identity(db, task)
 
 
 def build_project_context(db: Session, project: Project) -> Dict[str, Any]:
@@ -122,7 +131,8 @@ def build_task_context(db: Session, task: Task) -> Dict[str, Any]:
         "task_id": str(task.id),
         "task_title": task.title,
         "task_description": task.description,
-        "acceptance_criteria": list(task.acceptance_criteria or []),
+        "acceptance_criteria": _review_criteria(db, task),
+        "acceptance_criteria_version": _criteria_identity(db, task),
         "task_priority": task.priority.value if task.priority else None,
         "task_deadline": task.deadline.isoformat() if task.deadline else None,
         "sprint": {
@@ -223,7 +233,8 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
     return {
         "task_title": task.title,
         "task_description": (task.description or "")[:500],
-        "acceptance_criteria": list(task.acceptance_criteria or [])[:8],
+        "acceptance_criteria": _review_criteria(db, task)[:8],
+        "acceptance_criteria_version": _criteria_identity(db, task),
         "technology_stack": list(project.technology_stack or [])[:6],
         "has_work_evidence": has_work_evidence,
         "evidence_level": evidence_level,

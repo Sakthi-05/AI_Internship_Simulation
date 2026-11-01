@@ -36,10 +36,10 @@ def test_performance_trend_service_exists():
 
 
 def test_contextual_adaptability_service_exists():
-    """Verify contextual adaptability service exists."""
-    from app.services.engines.workflow_engine import maybe_trigger_contextual_requirement_change
-    assert callable(maybe_trigger_contextual_requirement_change)
-    print("✓ Contextual adaptability service exists")
+    """Requirement changes are issued by the workplace writer, not a status coin-flip."""
+    from app.services.workplace_scenarios import issue_requirement_change
+    assert callable(issue_requirement_change)
+    print("✓ Requirement-change writer exists")
 
 
 def test_review_service_exists():

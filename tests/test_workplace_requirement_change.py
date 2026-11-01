@@ -18,6 +18,7 @@ from app.models.enums import (
     TaskPriority,
     TaskStatus,
     TaskType,
+    WorkflowEventType,
 )
 from app.models.manager import Manager
 from app.models.message import Message
@@ -172,6 +173,39 @@ def test_timer_cannot_issue_a_requirement_change(db):
     ).scalar_one() == 0
 
 
+def _changes(client, headers, simulation_id, task_id):
+    response = client.get(
+        f"/api/simulations/{simulation_id}/tasks/{task_id}/events",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return [item for item in response.json()["events"] if item["event_type"] == "requirement_change"]
+
+
+def _raise_change(client, headers, simulation_id, task_id):
+    started = client.post(f"/api/simulations/{simulation_id}/tasks/{task_id}/start", headers=headers)
+    assert started.status_code == 200, started.text
+    assert _changes(client, headers, simulation_id, task_id) == []
+    noted = _send_approach_note(client, headers, simulation_id, task_id)
+    assert noted.status_code == 200, noted.text
+    changes = _changes(client, headers, simulation_id, task_id)
+    assert len(changes) == 1
+    return changes[0]
+
+
+def _send_approach_note(client, headers, simulation_id, task_id):
+    events = client.get(
+        f"/api/simulations/{simulation_id}/tasks/{task_id}/events",
+        headers=headers,
+    ).json()["events"]
+    note = next(item for item in events if item["event_type"] == "stakeholder_message")
+    return client.post(
+        f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{note['id']}/respond",
+        headers=headers,
+        data={"response": "I have started the orders endpoint and will return the order list from the handler."},
+    )
+
+
 def test_requirement_change_flow_persists_and_does_not_duplicate(client, auth_headers, db):
     student_id = "student_001"
     ids = _world(db, student_id)
@@ -180,10 +214,11 @@ def test_requirement_change_flow_persists_and_does_not_duplicate(client, auth_he
 
     started = client.post(f"/api/simulations/{simulation_id}/tasks/{task_id}/start", headers=auth_headers)
     assert started.status_code == 200, started.text
+    assert _changes(client, auth_headers, simulation_id, task_id) == []
 
-    first = client.get(f"/api/simulations/{simulation_id}/tasks/{task_id}/events", headers=auth_headers)
-    assert first.status_code == 200, first.text
-    changes = [item for item in first.json()["events"] if item["event_type"] == "requirement_change"]
+    noted = _send_approach_note(client, auth_headers, simulation_id, task_id)
+    assert noted.status_code == 200, noted.text
+    changes = _changes(client, auth_headers, simulation_id, task_id)
     assert len(changes) == 1
     event = changes[0]
     assert event["status"] == "pending"
@@ -194,8 +229,9 @@ def test_requirement_change_flow_persists_and_does_not_duplicate(client, auth_he
 
     again = client.post(f"/api/simulations/{simulation_id}/tasks/{task_id}/start", headers=auth_headers)
     assert again.status_code == 400
-    second = client.get(f"/api/simulations/{simulation_id}/tasks/{task_id}/events", headers=auth_headers)
-    assert len([item for item in second.json()["events"] if item["event_type"] == "requirement_change"]) == 1
+    repeated = _send_approach_note(client, auth_headers, simulation_id, task_id)
+    assert repeated.status_code == 200, repeated.text
+    assert len(_changes(client, auth_headers, simulation_id, task_id)) == 1
 
     persisted = SessionLocal()
     try:
@@ -230,6 +266,7 @@ def test_requirement_change_flow_persists_and_does_not_duplicate(client, auth_he
         data={"response": "ok"},
     )
     assert thin.status_code == 200, thin.text
+    assert thin.json()["status"] == "acknowledged"
     assert thin.json()["assessment"]["status"] == "insufficient_evidence"
     assert thin.json()["assessment"]["communication"]["score"] is None
     assert thin.json()["assessment"]["adaptability"]["score"] is None
@@ -262,10 +299,7 @@ def test_substantive_reply_and_later_action_are_scored(client, auth_headers, db)
     # already has state that blocks a second in-progress simulation.
     simulation_id = ids["simulation_id"]
     task_id = ids["task_id"]
-    started = client.post(f"/api/simulations/{simulation_id}/tasks/{task_id}/start", headers=auth_headers)
-    assert started.status_code == 200, started.text
-    events = client.get(f"/api/simulations/{simulation_id}/tasks/{task_id}/events", headers=auth_headers).json()["events"]
-    event = next(item for item in events if item["event_type"] == "requirement_change")
+    event = _raise_change(client, auth_headers, simulation_id, task_id)
     criterion = event["updated_requirement"]
 
     ack = client.post(
@@ -279,6 +313,7 @@ def test_substantive_reply_and_later_action_are_scored(client, auth_headers, db)
         data={"response": f"I will adapt the endpoint and add validation so invalid input returns an error. New requirement: {criterion}"},
     )
     assert reply.status_code == 200, reply.text
+    assert reply.json()["status"] == "acknowledged"
     assert reply.json()["assessment"]["communication"]["status"] == "scored"
     assert reply.json()["assessment"]["communication"]["score"] is not None
     assert reply.json()["assessment"]["adaptability"]["status"] == "insufficient_evidence"
@@ -307,13 +342,7 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
     ids = _world(db, student_id)
     simulation_id = ids["simulation_id"]
     task_id = ids["task_id"]
-    assert client.post(f"/api/simulations/{simulation_id}/tasks/{task_id}/start", headers=headers).status_code == 200
-    event = next(
-        item for item in client.get(
-            f"/api/simulations/{simulation_id}/tasks/{task_id}/events", headers=headers
-        ).json()["events"]
-        if item["event_type"] == "requirement_change"
-    )
+    event = _raise_change(client, headers, simulation_id, task_id)
     criterion = event["updated_requirement"]
     assert client.post(
         f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{event['id']}/acknowledge",
@@ -331,6 +360,7 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
         json={"action": "adapted_work", "detail": f"I added validation for invalid input. {criterion}"},
     )
     assert action.status_code == 200, action.text
+    assert action.json()["status"] == "resolved"
     body = action.json()["assessment"]
     assert body["status"] == "scored"
     assert body["communication"]["score"] is not None
@@ -348,6 +378,9 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
     ).json()["events"]
     stored = next(item for item in refreshed if item["id"] == event["id"])
     assert stored["phase"] == "assessed"
+    assert stored["status"] == "resolved"
+    assert stored["subsequent_actions"][0]["action"] == "adapted_work"
+    assert criterion in stored["subsequent_actions"][0]["detail"]
     assert stored["response"]
     assert stored["manager_message"]
     assert criterion in stored["acceptance_criteria"]
@@ -362,3 +395,110 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
     assert chat.status_code == 200, chat.text
     assert any(item["sender_type"] == MessageSenderType.MANAGER.value and criterion in item["content"] for item in chat.json())
     assert any(item["sender_type"] == MessageSenderType.STUDENT.value for item in chat.json())
+    assert stored["status"] == "resolved"
+
+
+def test_status_transition_cannot_issue_a_requirement_change(db):
+    ids = _world(db, f"status_{uuid.uuid4().hex[:8]}")
+    simulation = db.get(Simulation, ids["simulation_id"])
+    task = db.get(Task, ids["task_id"])
+    task.status = TaskStatus.IN_PROGRESS
+    db.add(task)
+    db.commit()
+    with pytest.raises(WorkplaceScenarioError):
+        issue_requirement_change(db, simulation, task, trigger_activity="task_in_progress")
+    assert db.execute(
+        select(func.count()).select_from(WorkflowEvent).where(
+            WorkflowEvent.task_id == task.id,
+            WorkflowEvent.event_type == WorkflowEventType.REQUIREMENT_CHANGE,
+        )
+    ).scalar_one() == 0
+
+
+def test_manager_message_issues_one_requirement_change(client, db):
+    from app.main import app
+    from app.models.project_state import ProjectState
+    from app.services.ai.ai_service import MockAIService, get_ai_service
+    from tests.conftest import make_token
+
+    student_id = f"chat_{uuid.uuid4().hex[:8]}"
+    headers = {"Authorization": f"Bearer {make_token(student_id)}"}
+    ids = _world(db, student_id)
+    project_id = db.get(Simulation, ids["simulation_id"]).project_id
+    db.add(ProjectState(project_id=project_id))
+    db.commit()
+    app.dependency_overrides[get_ai_service] = lambda: MockAIService()
+    try:
+        assert client.post(
+            f"/api/simulations/{ids['simulation_id']}/tasks/{ids['task_id']}/start",
+            headers=headers,
+        ).status_code == 200
+        assert _changes(client, headers, ids["simulation_id"], ids["task_id"]) == []
+        first = client.post(
+            f"/api/companies/{ids['company_id']}/chat/manager",
+            headers=headers,
+            json={"content": "I am implementing the orders endpoint and returning the order list."},
+        )
+        assert first.status_code == 201, first.text
+        changes = _changes(client, headers, ids["simulation_id"], ids["task_id"])
+        assert len(changes) == 1
+        assert changes[0]["status"] == "pending"
+        second = client.post(
+            f"/api/companies/{ids['company_id']}/chat/manager",
+            headers=headers,
+            json={"content": "I am still implementing the orders endpoint."},
+        )
+        assert second.status_code == 201, second.text
+        assert len(_changes(client, headers, ids["simulation_id"], ids["task_id"])) == 1
+    finally:
+        app.dependency_overrides.pop(get_ai_service, None)
+
+
+def test_concurrent_work_creates_one_requirement_change(db):
+    import threading
+
+    ids = _world(db, f"race_{uuid.uuid4().hex[:8]}")
+    setup = SessionLocal()
+    try:
+        task = setup.get(Task, ids["task_id"])
+        task.status = TaskStatus.IN_PROGRESS
+        setup.add(task)
+        setup.commit()
+    finally:
+        setup.close()
+
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def _issue():
+        local = SessionLocal()
+        try:
+            barrier.wait(timeout=5)
+            simulation = local.get(Simulation, ids["simulation_id"])
+            task = local.get(Task, ids["task_id"])
+            issue_requirement_change(local, simulation, task, trigger_activity="approach_note")
+            local.commit()
+        except Exception as exc:
+            errors.append(exc)
+            local.rollback()
+        finally:
+            local.close()
+
+    workers = [threading.Thread(target=_issue), threading.Thread(target=_issue)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert errors == []
+    check = SessionLocal()
+    try:
+        count = check.execute(
+            select(func.count()).select_from(WorkflowEvent).where(
+                WorkflowEvent.simulation_id == ids["simulation_id"],
+                WorkflowEvent.task_id == ids["task_id"],
+                WorkflowEvent.event_type == WorkflowEventType.REQUIREMENT_CHANGE,
+            )
+        ).scalar_one()
+        assert count == 1
+    finally:
+        check.close()

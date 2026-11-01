@@ -32,7 +32,11 @@ test("acknowledgment moves the student to a free-text reply, then an adaptation"
   assert.equal(workplacePhase(acknowledged), "reply");
   const replied = { ...acknowledged, response: "I will update validation for invalid input." };
   assert.equal(workplacePhase(replied), "adapt");
-  const submittedOnly = { ...replied, subsequent_actions: [{ action: "task_submitted" }] };
+  const submittedOnly = {
+    ...replied,
+    subsequent_actions: [{ action: "task_submitted" }],
+    assessment: { adaptability: { status: "scored", score: 74 } },
+  };
   assert.equal(workplacePhase(submittedOnly), "adapt");
   const adapted = { ...replied, subsequent_actions: [{ action: "adapted_work" }] };
   assert.equal(workplacePhase(adapted), "assessed");

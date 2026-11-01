@@ -21,7 +21,6 @@ from app.models.task_path import SimulationTaskPath
 from app.services.engines.simulation_task_state_machine import SimulationTaskState
 
 
-REQUIREMENT_CHANGE_TRIGGER_STAGE = 0.3  # Trigger at 30% of task duration
 DEADLINE_WARNING_THRESHOLD_MINUTES = 5  # Warn 5 minutes before deadline
 
 
@@ -32,47 +31,33 @@ async def trigger_requirement_change_event(
     scenario: Scenario,
     original_requirement: str,
     updated_requirement: str,
-    trigger_condition: str = "task_progress",
+    trigger_condition: str = "recorded_work",
 ) -> WorkflowEvent:
-    """Create a REQUIREMENT_CHANGE workflow event."""
-    event = WorkflowEvent(
-        simulation_id=simulation.id,
-        task_id=task.id,
-        scenario_id=scenario.id if scenario else None,
-        event_type=WorkflowEventType.REQUIREMENT_CHANGE,
-        title="Requirement Change",
-        message="The requirements for this task have been updated.",
-        description=(
-            f"Original requirement: {original_requirement}\n\n"
-            f"Updated requirement: {updated_requirement}"
-        ),
-        original_requirement=original_requirement,
-        updated_requirement=updated_requirement,
-        trigger_condition=trigger_condition,
-        action_required=True,
-        occurred_at=datetime.now(timezone.utc),
-        status="pending",
-        metadata_json={
-            "trigger_stage": REQUIREMENT_CHANGE_TRIGGER_STAGE,
-            "task_type": task.task_type.value if task.task_type else None,
-        },
-    )
-    db.add(event)
-    db.flush()
-    
-    # Log activity
-    from app.services.activity_log_service import log_activity
-    log_activity(
+    """Create a requirement change through the workplace scenario writer.
+
+    ``original_requirement``, ``updated_requirement``, and ``trigger_condition``
+    are retained for existing callers. The stored criterion and dedupe decision
+    always come from ``issue_requirement_change``.
+    """
+    del original_requirement, updated_requirement
+    from app.services.workplace_scenarios import issue_requirement_change
+
+    activity = (trigger_condition or "recorded_work").strip().lower()
+    if activity in {"task_progress", "mid_task_progress", "task_started", "task_in_progress"}:
+        activity = "recorded_work"
+    event = issue_requirement_change(
         db,
-        company_id=simulation.company_id,
-        actor="system",
-        action="requirement_change_event",
-        detail=f"Requirement change event triggered for task '{task.title}'",
-        simulation_id=str(simulation.id),
-        task_id=str(task.id),
-        event_id=str(event.id),
+        simulation,
+        task,
+        trigger_activity=activity,
+        scenario=scenario,
     )
-    
+    if event is None:
+        from app.services.workplace_scenarios import find_requirement_change
+
+        event = find_requirement_change(db, simulation, task)
+    if event is None:
+        raise ValueError("Requirement change was not created")
     return event
 
 
@@ -272,9 +257,8 @@ async def check_and_trigger_workflow_events(
                     event = await trigger_deadline_warning_event(db, simulation, task, scenario, remaining_minutes)
                     triggered_events.append(event)
 
-    # Requirement changes are issued by workplace_scenarios when the student
-    # starts or is working the task. Progress percentage and the clock do not
-    # create a second, generic change.
+    # Requirement changes are not created from elapsed time or task progress.
+    # issue_requirement_change is the only writer, and it runs after recorded work.
 
     sprint = db.get(Sprint, task.sprint_id) if task and task.sprint_id else None
     if sprint is not None:
@@ -387,7 +371,11 @@ async def respond_to_workflow_event(
     event = db.get(WorkflowEvent, event_id)
     if not event:
         raise ValueError("Workflow event not found")
-    
+    if event.event_type == WorkflowEventType.REQUIREMENT_CHANGE:
+        raise ValueError(
+            "Requirement changes are updated through the workplace scenario, not this responder."
+        )
+
     event.response = response
     event.responded_at = datetime.now(timezone.utc)
     event.status = "acknowledged"

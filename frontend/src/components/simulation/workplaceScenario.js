@@ -18,7 +18,7 @@ export function workplacePhase(event) {
   if (event.status === "pending") return "acknowledge";
   if (!event.response) return "reply";
   const described = (event.subsequent_actions || []).some((item) => item.action === "adapted_work");
-  if (event.assessment?.adaptability?.status !== "scored" && !described) return "adapt";
+  if (!described) return "adapt";
   return "assessed";
 }
 

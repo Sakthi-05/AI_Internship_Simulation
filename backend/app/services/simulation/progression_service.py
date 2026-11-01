@@ -593,19 +593,21 @@ async def trigger_requirement_change_for_task(
     original_requirement: str,
     updated_requirement: str,
 ) -> None:
+    """Issue one requirement change through the workplace scenario writer.
+
+    The supplied requirement strings are not stored separately. Callers must
+    pass a task that is already in progress; this does not run on a timer.
     """
-    Trigger a requirement change event for a task.
-    This can be called by the simulation orchestrator or external triggers.
-    """
+    del original_requirement, updated_requirement
     from app.services.engines import trigger_requirement_change_event
     await trigger_requirement_change_event(
         db,
         simulation,
         task,
         scenario,
-        original_requirement,
-        updated_requirement,
-        trigger_condition="mid_task_progress",
+        "",
+        "",
+        trigger_condition="recorded_work",
     )
 
 

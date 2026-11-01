@@ -204,4 +204,15 @@ class WorkflowEvent(Base, UUIDPKMixin, TimestampMixin):
         Index("ix_workflow_events_type", "event_type"),
         Index("ix_workflow_events_occurred_at", "occurred_at"),
         Index("ix_workflow_events_status", "status"),
+        Index(
+            "uq_workflow_events_one_open_requirement_change",
+            "simulation_id",
+            "task_id",
+            unique=True,
+            postgresql_where=text(
+                "event_type = 'REQUIREMENT_CHANGE' "
+                "AND status IN ('pending', 'acknowledged') "
+                "AND task_id IS NOT NULL"
+            ),
+        ),
     )
