@@ -28,6 +28,16 @@ async def create_manager_response(
         ai_service, manager, project, state, history, student_message,
         workplace_context=workplace_context,
     )
+    return persist_manager_response(db, manager, history, content)
+
+
+def persist_manager_response(
+    db: Session,
+    manager: Manager,
+    history: List[Message],
+    content: str,
+) -> Message:
+    """Persist generated manager text through the established chat record path."""
     message = Message(
         company_id=manager.company_id,
         sender_type=MessageSenderType.MANAGER,

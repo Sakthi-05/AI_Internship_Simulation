@@ -20,6 +20,9 @@ from app.api.routes import (
 )
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
+from app.agents.specialists.technical_review_agent import create_technical_review_orchestrator
+from app.agents.specialists.competency_agent import register_competency_agent
+from app.agents.specialists.adaptation_agent import register_adaptation_agent
 from app.services.scheduler_jobs import check_high_stress_projects, send_proactive_workplace_messages
 
 # Configure logging
@@ -56,6 +59,13 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan,
 )
+
+# The registry and agent instance are application-owned. Request-scoped DB and
+# provider dependencies are bound only for the duration of each review call.
+app.state.agent_orchestrator = create_technical_review_orchestrator()
+register_competency_agent(app.state.agent_orchestrator.registry)
+register_adaptation_agent(app.state.agent_orchestrator.registry,
+                          orchestrator=app.state.agent_orchestrator)
 
 app.add_middleware(
     CORSMiddleware,

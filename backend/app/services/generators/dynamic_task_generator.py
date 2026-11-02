@@ -40,6 +40,7 @@ async def generate_dynamic_task(
     sprint: Sprint,
     student_id: str,
     previous_task: Optional[Task] = None,
+    competency_focus: Optional[Dict[str, Any]] = None,
 ) -> Task:
     """Generate next task dynamically based on actual student technical work."""
     profile = get_or_create_profile(db, student_id)
@@ -106,6 +107,30 @@ async def generate_dynamic_task(
         f"3. If performance trend is 'improving' or 'consistently_strong', increase technical depth, responsibility, and integration complexity.\n"
         f"4. Output valid JSON with keys: title, description, acceptance_criteria, priority, task_type, difficulty, estimated_hours, hints, recommended_team_role, generation_reason."
     )
+    focus_dimensions = []
+    focus_task_type = None
+    focus_reason = None
+    focus_evidence = []
+    if isinstance(competency_focus, dict) and competency_focus.get("status") == "recommended":
+        allowed_dimensions = {"technical_knowledge", "problem_solving", "decision_making",
+                              "communication", "critical_thinking", "adaptability",
+                              "time_management", "professionalism"}
+        focus_dimensions = [value for value in (competency_focus.get("focus_competencies") or [])
+                            if value in allowed_dimensions][:1]
+        try:
+            proposed_type = TaskType(competency_focus.get("proposed_task_type"))
+        except (ValueError, TypeError):
+            proposed_type = None
+        focus_task_type = proposed_type.value if proposed_type else None
+        focus_reason = str(competency_focus.get("reason") or "")[:500]
+        focus_evidence = [item for item in (competency_focus.get("evidence_references") or [])
+                          if isinstance(item, dict)][:12]
+        if focus_dimensions:
+            prompt += (
+                "\nEvidence-backed competency practice focus for this next eligible task: "
+                f"{focus_dimensions[0]}. Suggested existing task type: {focus_task_type or 'keep the generated type'}. "
+                "Keep the task aligned with the sprint objective and do not change its difficulty."
+            )
     system_prompt = (
         "You are an Adaptive Task Engine for an AI Internship Simulation. Generate contextual tasks tailored to student performance."
     )
@@ -130,6 +155,8 @@ async def generate_dynamic_task(
 
     # Classify task_type enum safely
     task_type_val = str(task_payload.get("task_type", "coding")).lower()
+    if focus_task_type:
+        task_type_val = focus_task_type
     try:
         task_type_enum = TaskType(task_type_val)
     except ValueError:
@@ -145,8 +172,17 @@ async def generate_dynamic_task(
     hints = task_payload.get("hints") or [
         "Review project documentation and past submission feedback before implementing."
     ]
+    if focus_dimensions:
+        if not isinstance(hints, list):
+            hints = [str(hints)]
+        hints = list(hints)
+        focus_hint = f"Practice {focus_dimensions[0]} while meeting the sprint objective."
+        if focus_hint not in hints:
+            hints.append(focus_hint)
     recommended_role = task_payload.get("recommended_team_role") or "Backend Developer"
     gen_reason = task_payload.get("generation_reason") or f"Generated for Sprint {sprint.sprint_number} objective."
+    if focus_dimensions and focus_reason:
+        gen_reason = f"{gen_reason} Competency focus: {focus_reason}"[:1000]
 
     start_time = datetime.now(timezone.utc)
     deadline = start_time + timedelta(days=3)
@@ -173,6 +209,12 @@ async def generate_dynamic_task(
             "generation_reason": gen_reason,
             "performance_trend_at_generation": trend_data.get("trend", "stable"),
             "previous_task_id": str(previous_task.id) if previous_task else None,
+            "competency_focus": ({
+                "dimensions": focus_dimensions,
+                "task_type": focus_task_type,
+                "reason": focus_reason,
+                "evidence_references": focus_evidence,
+            } if focus_dimensions else None),
         }
     )
     db.add(task)

@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
+from app.agents.contracts import ExecutionStatus
+from app.agents.dependencies import get_agent_orchestrator
+from app.agents.orchestrator import AgentOrchestrator
+from app.agents.specialists.competency_agent import invoke_competency_agent
 from app.models.enums import SimulationStatus
 from app.models.intelligence import Certificate, FeedbackReport, InteractionEvaluation, ReadinessSnapshot, StudentProfile
 from app.models.simulation import Simulation
@@ -176,10 +180,28 @@ def adaptive_history(simulation_id: uuid.UUID, db: Session = Depends(get_db), us
 
 
 @router.get("/analytics")
-def analytics(simulation_id: Optional[uuid.UUID] = None, db: Session = Depends(get_db), user: CurrentUser = Depends(get_current_user)):
+async def analytics(simulation_id: Optional[uuid.UUID] = None, db: Session = Depends(get_db),
+                    user: CurrentUser = Depends(get_current_user),
+                    orchestrator: AgentOrchestrator = Depends(get_agent_orchestrator)):
     if simulation_id:
         _owned_simulation(db, user, simulation_id)
-    return get_analytics(db, user.student_id, simulation_id)
+    result = get_analytics(db, user.student_id, simulation_id)
+    if simulation_id:
+        assessment = await invoke_competency_agent(
+            orchestrator, db, simulation_id=simulation_id,
+            student_id=user.student_id,
+        )
+        if assessment.status == ExecutionStatus.SUCCEEDED and assessment.result is not None:
+            result["competency_assessment"] = assessment.result
+        else:
+            # Analytics remains available if a simulation's evidence context is
+            # incomplete. Do not expose internal errors or block the dashboard.
+            result["competency_assessment"] = {
+                "status": "unavailable",
+                "error_code": assessment.error.code if assessment.error else "agent_unavailable",
+                "dimensions": [],
+            }
+    return result
 
 
 @router.get("/feedback")

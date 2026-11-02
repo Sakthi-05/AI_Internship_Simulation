@@ -10,14 +10,20 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.contracts import AgentRequest, ExecutionStatus
+from app.agents.dependencies import get_agent_orchestrator
+from app.agents.orchestrator import AgentOrchestrator
+from app.agents.specialists.technical_review_agent import bind_technical_review_runtime
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
 from app.models.company import Company
 from app.models.enums import ReviewResult, ReviewSeverity, ReviewStatus, SubmissionStatus, TaskStatus
 from app.models.project import Project
 from app.models.sprint import Sprint
+from app.models.simulation import Simulation
 from app.models.submission import AIReview, ReviewHistory, Submission, SubmissionVersion
 from app.models.task import Task
+from app.models.task_path import SimulationTaskPath
 from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.ai.review_service import ReviewEvaluationError, ReviewService
 
@@ -60,6 +66,7 @@ async def create_review(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
     ai_service: AIService = Depends(get_ai_service),
+    orchestrator: AgentOrchestrator = Depends(get_agent_orchestrator),
 ):
     project = _get_owned_project(project_id, db, user)
     version = _get_owned_version(version_id, db, user)
@@ -126,10 +133,50 @@ async def create_review(
             detail=f"Can only review submitted versions. Current status: {version.status.value}",
         )
 
-    service = ReviewService(ai_service)
     try:
-        result = await service.review_submission_version(db, version)
-        return result
+        simulation = db.execute(
+            select(Simulation)
+            .join(SimulationTaskPath, SimulationTaskPath.simulation_id == Simulation.id)
+            .where(
+                Simulation.project_id == project.id,
+                Simulation.student_id == user.student_id,
+                SimulationTaskPath.task_id == task.id,
+            )
+            .order_by((Simulation.current_task_id != task.id).asc())
+        ).scalars().first()
+        if simulation is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A simulation context for this submission is unavailable.",
+            )
+
+        # Bind request-scoped dependencies to the one app-owned agent instance.
+        # ContextVar isolates concurrent requests without rebuilding registries.
+        with bind_technical_review_runtime(db, ai_service, orchestrator):
+            agent_response = await orchestrator.execute(AgentRequest(
+                agent_id="technical_review",
+                simulation_id=simulation.id,
+                payload={
+                    "simulation_id": str(simulation.id),
+                    "student_id": user.student_id,
+                    "submission_id": str(version.submission_id),
+                    "submission_version_id": str(version.id),
+                    "task_id": str(task.id),
+                },
+                timeout_seconds=85,
+            ))
+        if agent_response.status != ExecutionStatus.SUCCEEDED or not agent_response.result:
+            code = agent_response.error.code if agent_response.error else "agent_execution_failed"
+            raise RuntimeError(f"Technical review agent failed: {code}")
+
+        output = agent_response.result.get("review_response")
+        if not isinstance(output, dict):
+            raise RuntimeError("Technical review agent returned an invalid API response")
+        if output.get("status") == ReviewStatus.IN_PROGRESS.value:
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=output)
+        return output
+    except HTTPException:
+        raise
     except Exception as exc:
         # The submission has already committed. Make unexpected failures
         # visible and retryable instead of leaving an untracked UNDER_REVIEW

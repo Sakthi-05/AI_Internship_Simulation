@@ -271,6 +271,8 @@ class MockAIService(AIService):
     ) -> Dict[str, Any]:
         sp = (system_prompt or "").lower()
         p = prompt.lower()
+        if "scenario proposal" in sp:
+            return self._generate_mock_scenario_proposal(prompt)
         if "baseline" in sp or "baseline" in p or "question bank" in p:
             return self._generate_mock_baseline_questions(prompt)
         if "generate_task" in sp or "generate next task" in p or "first task" in p or "dynamic task" in p:
@@ -280,6 +282,55 @@ class MockAIService(AIService):
         if "Provide your final manager review decision as JSON" in prompt or "You are reviewing an AI code review" in sp:
             return self._generate_mock_manager_review()
         return self._generate_mock_review()
+
+    def _generate_mock_scenario_proposal(self, prompt: str) -> Dict[str, Any]:
+        """Produce a deterministic narrative for the Scenario Agent contract."""
+        context: Dict[str, Any] = {}
+        marker = "Context:\n"
+        if marker in prompt:
+            try:
+                context = json.loads(prompt.split(marker, 1)[1])
+            except (TypeError, ValueError):
+                context = {}
+        category = str(context.get("scenario_category") or "workplace")
+        task = str(context.get("task_title") or "the current task")
+        templates = {
+            "requirement_change": (
+                "Review an updated criterion", f"While you work on {task}, a recorded change adds a validation requirement. "
+                "Compare the current and previous criteria before deciding what to revise.",
+                "Explain how you will adapt the in-progress work to meet the added criterion.",
+                "The proposal is grounded in the task's persisted criteria history and supports adaptation and communication."),
+            "collaboration": (
+                "Coordinate a teammate dependency", f"A teammate's request affects progress on {task}. "
+                "Clarify the dependency and agree who owns the next step.",
+                "Reply with an owner, a coordination step, and the information the teammate needs.",
+                "The recorded teammate request is directly related to the current task and practices collaboration."),
+            "time_management": (
+                "Re-plan after a deadline warning", f"A deadline warning has arrived while you work on {task}. "
+                "Assess remaining work and select the most valuable next action.",
+                "Give a short ordered plan and state any schedule risk you would communicate.",
+                "The persisted deadline warning makes time management relevant to this task."),
+            "prioritization": (
+                "Choose between competing work", f"A recorded priority conflict affects {task}. "
+                "Compare impact, urgency, and dependencies before committing to the next action.",
+                "State what you will do first and explain the trade-off to the team.",
+                "The proposal follows a persisted priority event and exercises decision making."),
+            "ownership": (
+                "Take ownership of an open issue", f"An issue related to {task} has no confirmed owner. "
+                "Clarify impact and make the next action explicit.",
+                "Say whether you will take ownership or coordinate an owner, and name the next step.",
+                "The issue is recorded in the workflow and provides evidence for a professional ownership scenario."),
+            "feedback_response": (
+                "Turn review feedback into an improvement", f"A persisted review of work on {task} asks for a change. "
+                "Identify the feedback that matters and plan a focused revision.",
+                "Explain what you will revise and how the next submission will show the change.",
+                "The scenario refers to an actual review outcome and exercises feedback response."),
+        }
+        title, situation, student_action, relevance = templates.get(
+            category, ("Respond to a workplace situation", f"Review the next step for {task}.",
+                      "Describe a clear next action.", "The proposal is tied to the current task."))
+        return {"title": title, "situation": situation,
+                "student_action": student_action, "relevance": relevance}
 
     def _generate_mock_baseline_questions(self, prompt: str) -> Dict[str, Any]:
         return {

@@ -308,9 +308,51 @@ def get_task_review_feedback(db: Session, task) -> Optional[Dict[str, Any]]:
 
 
 class ReviewService:
-    def __init__(self, ai_service: AIService):
+    def __init__(self, ai_service: AIService, *, orchestrator=None):
         self.ai_service = ai_service
+        self.orchestrator = orchestrator
         self.storage_service = FileStorageService()
+
+    async def _competency_task_focus(self, db, *, simulation, task, review, adaptation):
+        """Ask the registered agent for additive task focus; never block baseline generation."""
+        if self.orchestrator is None:
+            return None, None
+        try:
+            from app.agents.specialists.adaptation_agent import (
+                AdaptationAgentInput,
+                invoke_adaptation_agent,
+            )
+            response = await invoke_adaptation_agent(
+                self.orchestrator,
+                db,
+                payload=AdaptationAgentInput(
+                    simulation_id=simulation.id,
+                    student_id=review.version.submission.student_id,
+                    task_id=task.id,
+                    review_id=review.id,
+                    technical_adaptation=adaptation,
+                ),
+            )
+            if response.status.value != "succeeded" or not response.result:
+                logger.info("Competency adaptation unavailable review_id=%s code=%s",
+                            review.id, response.error.code if response.error else "unknown")
+                return None, None
+            proposed = response.result
+            recorded = {
+                "status": proposed.get("status"),
+                "reason": proposed.get("reason"),
+                "focus_competencies": proposed.get("focus_competencies", []),
+                "strength_competencies": proposed.get("strength_competencies", []),
+                "proposed_task_type": proposed.get("proposed_task_type"),
+                "evidence_references": proposed.get("evidence_references", []),
+            }
+            if proposed.get("status") == "recommended" and proposed.get("focus_competencies"):
+                return proposed, recorded
+            return None, recorded
+        except Exception as exc:
+            logger.warning("Competency adaptation fallback review_id=%s error_type=%s",
+                           review.id, type(exc).__name__)
+            return None, None
 
     async def review_submission_version(
         self,
@@ -679,8 +721,15 @@ class ReviewService:
                         _activate_sprint(db, target_sprint.id)
                 if target_sprint:
                     try:
+                        competency_focus, recorded_focus = await self._competency_task_focus(
+                            db, simulation=simulation, task=task, review=ai_review,
+                            adaptation=adaptation,
+                        )
+                        if recorded_focus is not None:
+                            adaptation["competency_adaptation"] = recorded_focus
                         next_task = await generate_dynamic_task(
-                            db, simulation, target_sprint, version.submission.student_id, task
+                            db, simulation, target_sprint, version.submission.student_id, task,
+                            competency_focus=competency_focus,
                         )
                         max_seq = db.execute(
                             select(SimulationTaskPath.sequence)

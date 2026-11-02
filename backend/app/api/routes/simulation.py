@@ -1625,7 +1625,7 @@ async def respond_to_simulation_event(
             from app.models.manager import Manager
             from app.models.project import Project
             from app.models.project_state import ProjectState
-            from app.services.manager_communication_service import create_manager_response
+            from app.services.manager_communication_service import create_manager_response, persist_manager_response
 
             manager = db.execute(select(Manager).where(Manager.company_id == simulation.company_id)).scalar_one()
             project = db.get(Project, simulation.project_id)
@@ -1642,9 +1642,26 @@ async def respond_to_simulation_event(
                 f"Criteria version: {version_number}. Original requirement: {event.original_requirement}. "
                 f"Updated requirement: {event.updated_requirement}. Student response: {response}"
             )
-            manager_response = await create_manager_response(
-                db, ai_service, manager, project, state, history, response, context
-            )
+            generated_text = None
+            student_message_id = metadata.get("student_message_id")
+            if student_message_id:
+                try:
+                    from app.agents.specialists.manager_agent import invoke_manager_agent
+                    manager_output = await invoke_manager_agent(
+                        db, ai_service, simulation_id=simulation.id,
+                        student_id=user.student_id, task_id=task.id,
+                        student_message_id=uuid.UUID(student_message_id),
+                        workplace_event_id=event.id,
+                    )
+                    generated_text = manager_output.manager_message if manager_output else None
+                except Exception:
+                    generated_text = None
+            if generated_text:
+                manager_response = persist_manager_response(db, manager, history, generated_text)
+            else:
+                manager_response = await create_manager_response(
+                    db, ai_service, manager, project, state, history, response, context
+                )
             metadata["manager_response_message_id"] = str(manager_response.id)
             metadata["manager_response_criteria_version_number"] = version_number
             event.metadata_json = metadata

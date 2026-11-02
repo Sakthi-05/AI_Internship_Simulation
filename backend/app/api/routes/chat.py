@@ -40,7 +40,7 @@ from app.schemas.chat import (
 # ✅ Correct imports
 from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.ai.ai_teammates import generate_teammate_reply
-from app.services.manager_communication_service import create_manager_response
+from app.services.manager_communication_service import create_manager_response, persist_manager_response
 
 from app.services.activity_log_service import log_activity
 from app.websockets.manager import manager as ws_manager
@@ -133,10 +133,25 @@ async def send_manager_message(
                 f"Description: {current_task.description or 'No description provided.'}. "
                 f"Acceptance criteria: {current_task.acceptance_criteria or 'No criteria provided.'}"
             )
-    reply_msg = await create_manager_response(
-        db, ai_service, manager_row, project, state, history, payload.content,
-        workplace_context,
-    )
+    manager_text = None
+    if simulation is not None and simulation.current_task_id is not None:
+        try:
+            from app.agents.specialists.manager_agent import invoke_manager_agent
+            manager_output = await invoke_manager_agent(
+                db, ai_service, simulation_id=simulation.id, student_id=user.student_id,
+                task_id=simulation.current_task_id, student_message_id=student_msg.id,
+            )
+            manager_text = manager_output.manager_message if manager_output else None
+        except Exception:
+            # Keep the existing manager-chat path available if orchestration context is incomplete.
+            manager_text = None
+    if manager_text:
+        reply_msg = persist_manager_response(db, manager_row, history, manager_text)
+    else:
+        reply_msg = await create_manager_response(
+            db, ai_service, manager_row, project, state, history, payload.content,
+            workplace_context,
+        )
 
     state.communication_frequency += 1
     db.add(state)
