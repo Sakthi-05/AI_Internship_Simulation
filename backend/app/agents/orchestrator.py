@@ -35,18 +35,24 @@ class AgentOrchestrator:
         except asyncio.TimeoutError:
             status, result = ExecutionStatus.TIMED_OUT, None
             error = AgentErrorInfo(code="agent_timeout", message="Agent execution timed out")
+            logger.warning("Agent handoff failed agent_id=%s correlation_id=%s code=%s",
+                           request.agent_id, request.correlation_id, error.code)
         except UnknownAgentError:
             status, result = ExecutionStatus.FAILED, None
             error = AgentErrorInfo(code="unknown_agent", message="Requested agent is not registered")
+            logger.warning("Agent handoff failed agent_id=%s correlation_id=%s code=%s",
+                           request.agent_id, request.correlation_id, error.code)
         except ValidationError:
             status, result = ExecutionStatus.FAILED, None
             error = AgentErrorInfo(code="validation_error", message="Agent input or output validation failed")
+            logger.warning("Agent handoff failed agent_id=%s correlation_id=%s code=%s",
+                           request.agent_id, request.correlation_id, error.code)
         except Exception as exc:
             status, result = ExecutionStatus.FAILED, None
             # Exception text may contain prompts, credentials, or provider internals.
             error = AgentErrorInfo(code="agent_execution_failed", message="Agent execution failed")
-            logger.exception("Agent execution failed agent_id=%s correlation_id=%s error_type=%s",
-                             request.agent_id, request.correlation_id, type(exc).__name__)
+            logger.exception("Agent execution failed agent_id=%s correlation_id=%s error_type=%s code=%s",
+                             request.agent_id, request.correlation_id, type(exc).__name__, error.code)
 
         metadata.completed_at = datetime.now(timezone.utc)
         metadata.duration_ms = (time.perf_counter() - tick) * 1000

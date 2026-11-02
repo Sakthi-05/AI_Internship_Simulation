@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
+from app.agents.dependencies import get_agent_orchestrator
+from app.agents.orchestrator import AgentOrchestrator
 
 from app.models.company import Company
 from app.models.enums import MessageSenderType, TaskStatus
@@ -89,6 +91,7 @@ async def send_manager_message(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
     ai_service: AIService = Depends(get_ai_service),
+    orchestrator: AgentOrchestrator = Depends(get_agent_orchestrator),
 ):
     company = _get_owned_company(company_id, db, user)
     project = _project_for(db, company_id)
@@ -139,6 +142,7 @@ async def send_manager_message(
             from app.agents.specialists.manager_agent import invoke_manager_agent
             manager_output = await invoke_manager_agent(
                 db, ai_service, simulation_id=simulation.id, student_id=user.student_id,
+                orchestrator=orchestrator,
                 task_id=simulation.current_task_id, student_message_id=student_msg.id,
             )
             manager_text = manager_output.manager_message if manager_output else None

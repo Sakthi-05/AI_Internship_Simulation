@@ -12,6 +12,7 @@ from app.agents.specialists.manager_agent import (
     ManagerAgentInput,
     ManagerCommunicationCategory,
     create_manager_orchestrator,
+    invoke_manager_agent,
     register_manager_agent,
 )
 from app.services.ai.ai_service import MockAIService
@@ -134,6 +135,24 @@ def test_registration_and_orchestrator_invocation():
     assert response.status.value == "succeeded"
     assert response.result["decision"] == "respond"
     assert response.result["manager_message"]
+
+
+def test_manager_helper_reuses_application_owned_orchestrator_and_request_runtime():
+    context, message_id, *_ = manager_context()
+    contexts = FakeContextManager(context)
+    provider = CountingProvider()
+    registry = AgentRegistry()
+    register_manager_agent(registry, context_manager=contexts)
+    orchestrator = AgentOrchestrator(registry)
+    output = _run_immediate(invoke_manager_agent(
+        object(), provider, orchestrator=orchestrator,
+        simulation_id=context.simulation_id, student_id=context.student_id,
+        task_id=context.current_task_id, student_message_id=message_id,
+    ))
+    assert orchestrator.registry is registry
+    assert output and output.decision == "respond"
+    assert contexts.calls[0]["simulation_id"] == context.simulation_id
+    assert provider.calls == 1
 
 
 def test_factory_creates_an_isolated_manager_registry():

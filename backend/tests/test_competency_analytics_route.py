@@ -96,6 +96,8 @@ def test_simulation_analytics_invokes_orchestrator_agent_and_adds_optional_profi
     assert technical["current_score"] == 78
     assert technical["evidence_status"] == "sufficient_evidence"
     assert technical["supporting_evidence"][0]["evidence_type"] == "assessment_attempt"
+    assert result["career_insights"]["status"] == "unavailable"
+    assert result["career_insights"]["readiness"] is None
     assert context_manager.calls[0]["profile"] == "competency"
     assert context_manager.calls[0]["simulation_id"] == simulation_id
 
@@ -115,6 +117,7 @@ def test_unavailable_simulation_context_does_not_break_analytics(monkeypatch):
     assert result["summary"] == {"simulations": 1}
     assert result["competency_assessment"] == {
         "status": "unavailable", "error_code": "agent_execution_failed", "dimensions": []}
+    assert result["career_insights"]["status"] == "unavailable"
     assert "private" not in str(result)
 
 

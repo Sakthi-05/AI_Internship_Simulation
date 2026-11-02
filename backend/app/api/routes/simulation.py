@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
+from app.agents.dependencies import get_agent_orchestrator
+from app.agents.orchestrator import AgentOrchestrator
 from app.models.company import Company
 from app.models.enums import MessageSenderType, SimulationStatus, ScenarioStatus, TaskStatus, SubmissionStatus, WorkflowEventStatus, WorkflowEventType
 from app.models.message import Message
@@ -1594,6 +1596,7 @@ async def respond_to_simulation_event(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
     ai_service: AIService = Depends(get_ai_service),
+    orchestrator: AgentOrchestrator = Depends(get_agent_orchestrator),
 ):
     """Respond to a workflow event (requirement change, deadline warning, etc.)."""
     simulation = _get_owned_simulation(simulation_id, db, user)
@@ -1649,6 +1652,7 @@ async def respond_to_simulation_event(
                     from app.agents.specialists.manager_agent import invoke_manager_agent
                     manager_output = await invoke_manager_agent(
                         db, ai_service, simulation_id=simulation.id,
+                        orchestrator=orchestrator,
                         student_id=user.student_id, task_id=task.id,
                         student_message_id=uuid.UUID(student_message_id),
                         workplace_event_id=event.id,

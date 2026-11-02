@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from collections import OrderedDict
 from enum import Enum
 from types import SimpleNamespace
@@ -21,6 +23,19 @@ from app.services.ai.ai_manager import generate_manager_reply
 from app.services.ai.ai_service import AIService, get_ai_service
 
 logger = logging.getLogger(__name__)
+_REQUEST_RUNTIME: ContextVar[tuple[Session, Optional[AIService]] | None] = ContextVar(
+    "manager_agent_runtime", default=None,
+)
+
+
+@contextmanager
+def bind_manager_runtime(db: Session, ai_service: Optional[AIService] = None):
+    """Bind request-owned DB/provider dependencies to the shared manager agent."""
+    token = _REQUEST_RUNTIME.set((db, ai_service))
+    try:
+        yield
+    finally:
+        _REQUEST_RUNTIME.reset(token)
 
 
 class ManagerCommunicationCategory(str, Enum):
@@ -73,19 +88,24 @@ class ManagerAgent(BaseAgent):
     input_model = ManagerAgentInput
     output_model = ManagerAgentOutput
 
-    def __init__(self, db: Session, *, context_manager: Optional[AgentContextManager] = None,
+    def __init__(self, db: Optional[Session] = None, *, context_manager: Optional[AgentContextManager] = None,
                  ai_service: Optional[AIService] = None):
         self.db = db
         self.context_manager = context_manager or AgentContextManager()
-        self.ai_service = ai_service or get_ai_service()
+        self.ai_service = ai_service
         self._response_cache: OrderedDict[str, ManagerAgentOutput] = OrderedDict()
         self._response_cache_limit = 128
 
     async def execute(self, payload: ManagerAgentInput,
                       context: Optional[AgentContext] = None) -> ManagerAgentOutput:
+        runtime = _REQUEST_RUNTIME.get()
+        db = self.db or (runtime[0] if runtime else None)
+        ai_service = (runtime[1] if runtime else None) or self.ai_service or get_ai_service()
+        if db is None:
+            return self._skip(payload, "database_context_unavailable", "Manager context is unavailable.")
         # This read also enforces simulation and company ownership.
         manager_context = self.context_manager.build(
-            self.db, simulation_id=payload.simulation_id, student_id=payload.student_id,
+            db, simulation_id=payload.simulation_id, student_id=payload.student_id,
             profile="manager",
         )
         task = manager_context.current_task
@@ -192,7 +212,7 @@ class ManagerAgent(BaseAgent):
         confidence = 0.82
         try:
             response = await generate_manager_reply(
-                self.ai_service, manager, project, state, history, student_text,
+                ai_service, manager, project, state, history, student_text,
                 workplace_context=workplace_context,
             )
             response = _clean_response(response)
@@ -304,7 +324,7 @@ class ManagerAgent(BaseAgent):
                                   workplace_event_id=event_id)
 
 
-def register_manager_agent(registry: AgentRegistry, db: Session, *,
+def register_manager_agent(registry: AgentRegistry, db: Optional[Session] = None, *,
                            context_manager: Optional[AgentContextManager] = None,
                            ai_service: Optional[AIService] = None) -> ManagerAgent:
     agent = ManagerAgent(db, context_manager=context_manager, ai_service=ai_service)
@@ -323,6 +343,7 @@ def create_manager_orchestrator(db: Session, *,
 
 
 async def invoke_manager_agent(db: Session, ai_service: AIService, *,
+                               orchestrator=None,
                                simulation_id: UUID, student_id: str,
                                task_id: Optional[UUID] = None,
                                student_message_id: Optional[UUID] = None,
@@ -332,17 +353,20 @@ async def invoke_manager_agent(db: Session, ai_service: AIService, *,
     from app.agents.orchestrator import AgentOrchestrator
     from app.agents.contracts import AgentRequest
 
-    registry = AgentRegistry()
-    register_manager_agent(registry, db, ai_service=ai_service)
+    if orchestrator is None:
+        registry = AgentRegistry()
+        register_manager_agent(registry, db, ai_service=ai_service)
+        orchestrator = AgentOrchestrator(registry)
     request = ManagerAgentInput(
         simulation_id=simulation_id, student_id=student_id, task_id=task_id,
         student_message_id=student_message_id, workplace_event_id=workplace_event_id,
         trigger_evidence_id=trigger_evidence_id,
     )
-    response = await AgentOrchestrator(registry).execute(
-        AgentRequest(agent_id=ManagerAgent.agent_id, simulation_id=simulation_id,
-                     payload=request.model_dump(mode="json"))
-    )
+    with bind_manager_runtime(db, ai_service):
+        response = await orchestrator.execute(
+            AgentRequest(agent_id=ManagerAgent.agent_id, simulation_id=simulation_id,
+                         payload=request.model_dump(mode="json"))
+        )
     if response.status.value != "succeeded" or not response.result:
         return None
     output = ManagerAgentOutput.model_validate(response.result)

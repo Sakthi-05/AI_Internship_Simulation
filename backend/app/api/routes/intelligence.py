@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
-from app.agents.contracts import ExecutionStatus
+from app.agents.contracts import AgentRequest, ExecutionStatus
 from app.agents.dependencies import get_agent_orchestrator
 from app.agents.orchestrator import AgentOrchestrator
 from app.agents.specialists.competency_agent import invoke_competency_agent
+from app.agents.specialists.competency_agent import bind_competency_runtime
 from app.models.enums import SimulationStatus
 from app.models.intelligence import Certificate, FeedbackReport, InteractionEvaluation, ReadinessSnapshot, StudentProfile
 from app.models.simulation import Simulation
@@ -201,6 +202,40 @@ async def analytics(simulation_id: Optional[uuid.UUID] = None, db: Session = Dep
                 "error_code": assessment.error.code if assessment.error else "agent_unavailable",
                 "dimensions": [],
             }
+        # Career insights are an optional analytics extension. They consume
+        # the existing recommendation and readiness values and never persist.
+        recommendations = []
+        try:
+            evaluation_rows = db.execute(select(InteractionEvaluation).where(
+                InteractionEvaluation.student_id == user.student_id,
+                InteractionEvaluation.simulation_id == simulation_id,
+            ).order_by(desc(InteractionEvaluation.created_at)).limit(10)).scalars().all()
+            for row in evaluation_rows:
+                for item in row.recommendations or []:
+                    if item not in recommendations:
+                        recommendations.append(item)
+        except Exception:
+            # Keep legacy analytics functional for lightweight adapters and
+            # when recommendation history cannot be read.
+            recommendations = []
+        with bind_competency_runtime(db):
+            insight_result = await orchestrator.execute(AgentRequest(
+                agent_id="career_insights", simulation_id=simulation_id,
+                payload={"student_id": user.student_id, "simulation_id": str(simulation_id),
+                         "recommendations": recommendations,
+                         "readiness": result.get("readiness"),
+                         "competency_assessment": (result.get("competency_assessment")
+                             if isinstance(result.get("competency_assessment"), dict)
+                             and result["competency_assessment"].get("status") != "unavailable"
+                             and "student_id" in result["competency_assessment"]
+                             else None)},
+            ))
+        result["career_insights"] = insight_result.result if insight_result.status == ExecutionStatus.SUCCEEDED else {
+            "student_id": user.student_id, "simulation_id": str(simulation_id),
+            "status": "unavailable", "strengths": [], "competency_gaps": [],
+            "trends": [], "trend_status": "unavailable", "evidence_references": [],
+            "recommendations": recommendations, "readiness": result.get("readiness"),
+        }
     return result
 
 

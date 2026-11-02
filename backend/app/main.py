@@ -23,6 +23,8 @@ from app.core.exceptions import register_exception_handlers
 from app.agents.specialists.technical_review_agent import create_technical_review_orchestrator
 from app.agents.specialists.competency_agent import register_competency_agent
 from app.agents.specialists.adaptation_agent import register_adaptation_agent
+from app.agents.specialists.career_insights_agent import register_career_insights_agent
+from app.agents.specialists.manager_agent import register_manager_agent
 from app.services.scheduler_jobs import check_high_stress_projects, send_proactive_workplace_messages
 
 # Configure logging
@@ -64,6 +66,8 @@ app = FastAPI(
 # provider dependencies are bound only for the duration of each review call.
 app.state.agent_orchestrator = create_technical_review_orchestrator()
 register_competency_agent(app.state.agent_orchestrator.registry)
+register_manager_agent(app.state.agent_orchestrator.registry)
+register_career_insights_agent(app.state.agent_orchestrator.registry)
 register_adaptation_agent(app.state.agent_orchestrator.registry,
                           orchestrator=app.state.agent_orchestrator)
 
