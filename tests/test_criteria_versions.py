@@ -139,7 +139,22 @@ def test_successive_requirement_changes_version_the_criteria(client, db):
         json={"action": "adapted_work", "detail": f"I added validation for invalid input. {criterion}"},
     )
     assert action.status_code == 200, action.text
-    assert action.json()["status"] == "resolved"
+    assert action.json()["status"] == "acknowledged"
+
+    first_task = db.get(Task, task_id)
+    first_project = db.get(Project, db.get(Sprint, first_task.sprint_id).project_id)
+    first_submission = SubmissionService().store_submission(
+        db,
+        first_project,
+        first_task,
+        metadata={"code": f"# {criterion}\ndef validate_order(value):\n    return value"},
+    )
+    from app.services.workplace_scenarios import assess_requirement_changes_for_submission
+    assess_requirement_changes_for_submission(db, db.get(Simulation, simulation_id), first_task, student_id)
+    db.commit()
+    first_event = db.get(WorkflowEvent, uuid.UUID(first["id"]))
+    assert first_event.status.value == "resolved"
+    assert db.get(SubmissionVersion, uuid.UUID(first_submission["version_id"])) is not None
 
     db.expire_all()
     simulation = db.get(Simulation, simulation_id)
@@ -181,16 +196,51 @@ def test_successive_requirement_changes_version_the_criteria(client, db):
     assert db.execute(
         select(func.count()).select_from(AcceptanceCriteriaVersion).where(AcceptanceCriteriaVersion.task_id == task_id)
     ).scalar_one() == 3
+    db.commit()
 
+    assert client.post(
+        f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{second.id}/acknowledge",
+        headers=headers,
+    ).status_code == 200
+    second_criterion = second.updated_requirement
+    second_reply = client.post(
+        f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{second.id}/respond",
+        headers=headers,
+        data={"response": f"I will update validation to satisfy this new criterion: {second_criterion}"},
+    )
+    assert second_reply.status_code == 200, second_reply.text
+    second_action = client.post(
+        f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{second.id}/actions",
+        headers=headers,
+        json={"action": "adapted_work", "detail": f"I revised the endpoint for {second_criterion}"},
+    )
+    assert second_action.status_code == 200, second_action.text
+    assert second_action.json()["status"] == "acknowledged"
+    assert second_action.json()["subsequent_actions"][0]["event_id"] == str(second.id)
+    assert second_action.json()["subsequent_actions"][0]["criteria_version_id"] == str(versions[2].id)
+    assert second_action.json()["subsequent_actions"][0]["criteria_version_number"] == 3
+    db.expire_all()
+    task = db.get(Task, task_id)
     sprint = db.get(Sprint, task.sprint_id)
     project = db.get(Project, sprint.project_id)
     stored = SubmissionService().store_submission(
         db,
         project,
         task,
-        metadata={"response": f"The endpoint returns the order list and documents the new error cases. {criterion}"},
+        metadata={"code": f"# {second_criterion}\ndef validate_order(value):\n    return value"},
     )
+    from app.services.workplace_scenarios import assess_requirement_changes_for_submission
+    assess_requirement_changes_for_submission(db, db.get(Simulation, simulation_id), task, student_id)
     db.commit()
     version = db.get(SubmissionVersion, uuid.UUID(stored["version_id"]))
     assert version.version_metadata["acceptance_criteria_version"]["id"] == str(versions[2].id)
     assert version.version_metadata["acceptance_criteria_version"]["version_number"] == 3
+    refreshed_events = client.get(
+        f"/api/simulations/{simulation_id}/tasks/{task_id}/events", headers=headers
+    ).json()["events"]
+    restored_second = next(item for item in refreshed_events if item["id"] == str(second.id))
+    restored_first = next(item for item in refreshed_events if item["id"] == first["id"])
+    assert restored_second["status"] == "resolved"
+    assert restored_second["assessment"]["adaptability"]["status"] == "scored"
+    assert restored_second["subsequent_actions"][0]["criteria_version_number"] == 3
+    assert restored_first["subsequent_actions"][0]["criteria_version_number"] == 2

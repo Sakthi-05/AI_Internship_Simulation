@@ -184,8 +184,9 @@ def get_kanban_board(
     board: Dict[str, List[dict]] = {s.value: [] for s in TaskStatus}
     for task in tasks:
         task_data = _to_task_read(task, db).model_dump()
-        if lock_map:
+        if simulation_id is not None:
             task_data["locked"] = lock_map.get(task.id, True)
+            task_data["is_current"] = task.id == simulation.current_task_id
         board[task.status.value].append(task_data)
     return board
 

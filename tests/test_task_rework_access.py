@@ -17,6 +17,16 @@ from app.models.simulation import Simulation
 from app.models.task import Task
 
 
+def _criteria_from_prompt(prompt):
+    marker = "ACCEPTANCE CRITERIA:\n"
+    if marker not in prompt:
+        return []
+    section = prompt.split(marker, 1)[1]
+    for boundary in ("\nSUBMITTED FILES:", "\nPREVIOUS REVIEW:", "\nSTUDENT-PROVIDED", "\nSUBMISSION:"):
+        section = section.split(boundary, 1)[0]
+    return [line[2:].strip() for line in section.splitlines() if line.startswith("- ")]
+
+
 class _StrictReviewer(AIService):
     async def generate_text(self, prompt, system_prompt=None):
         return "review"
@@ -30,7 +40,10 @@ class _StrictReviewer(AIService):
             "strengths": [],
             "issues": ["thin"],
             "required_changes": ["Add more implementation detail and tests."],
-            "acceptance_criteria": [],
+            "acceptance_criteria": [
+                {"criterion": item, "met": False, "evidence": "The response does not demonstrate this requirement."}
+                for item in _criteria_from_prompt(prompt)
+            ],
             "code_quality": {"score": 50, "feedback": "ok"},
             "testing": {"score": 50, "feedback": "Add tests before resubmitting."},
             "security": {"score": 50, "feedback": "ok"},
@@ -51,20 +64,15 @@ class _ApprovingReviewer(AIService):
             "strengths": ["Clear implementation"],
             "issues": [],
             "required_changes": [],
-            "acceptance_criteria": [],
+            "acceptance_criteria": [
+                {"criterion": item, "met": True, "evidence": "The implementation and verification satisfy this requirement."}
+                for item in _criteria_from_prompt(prompt)
+            ],
             "code_quality": {"score": 95, "feedback": "Clear and maintainable."},
             "testing": {"score": 95, "feedback": "Verification evidence is present."},
             "security": {"score": 95, "feedback": "No security issues found."},
             "performance": {"score": 95, "feedback": "Performance is appropriate."},
         }
-
-
-class _UnavailableReviewer(AIService):
-    async def generate_text(self, prompt, system_prompt=None):
-        raise RuntimeError("Gemini unavailable")
-
-    async def generate_json(self, prompt, system_prompt=None):
-        raise RuntimeError("Gemini unavailable")
 
 
 def _generate(client, auth_headers, student_id):
@@ -311,6 +319,17 @@ class _ApprovingReviewer(AIService):
             "score": 90,
             "severity": "info",
             "summary": "Solid implementation meeting all acceptance criteria.",
+            "strengths": ["Clear implementation"],
+            "issues": [],
+            "required_changes": [],
+            "acceptance_criteria": [
+                {"criterion": item, "met": True, "evidence": "The implementation and verification satisfy this requirement."}
+                for item in _criteria_from_prompt(prompt)
+            ],
+            "code_quality": {"score": 90, "feedback": "Clear and maintainable."},
+            "testing": {"score": 90, "feedback": "Verification evidence is present."},
+            "security": {"score": 90, "feedback": "No security issues found."},
+            "performance": {"score": 90, "feedback": "Performance is appropriate."},
         }
 
 
@@ -358,7 +377,7 @@ def test_full_lifecycle_submit_review_rework_approve_complete(client):
     assert locked_next.status_code == 403, locked_next.text
 
     # 2. AI requests changes: same current task, feedback present.
-    reviewed = _review_version(client, headers, project_id, first.json()["version_id"], lambda: _UnavailableReviewer())
+    reviewed = _review_version(client, headers, project_id, first.json()["version_id"], lambda: _StrictReviewer())
     assert reviewed.json()["result"] == "changes_required"
     current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers).json()
     assert current["status"] == "changes_requested", current["status"]
@@ -387,8 +406,11 @@ def test_full_lifecycle_submit_review_rework_approve_complete(client):
 
     # 4. Approved review moves to MANAGER_APPROVAL only: not completed,
     # current unmoved, next task still locked.
-    approved = _review_version(client, headers, project_id, second.json()["version_id"], lambda: _UnavailableReviewer())
+    approved = _review_version(client, headers, project_id, second.json()["version_id"], lambda: _ApprovingReviewer())
     assert approved.json()["result"] == "approved"
+    adaptive_decision = approved.json()["adaptive_decision"]
+    assert len(adaptive_decision["recent_technical_scores"]) == 2, adaptive_decision
+    assert adaptive_decision["next_difficulty"] == "beginner", adaptive_decision
     current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers).json()
     assert current["status"] == "manager_approval", current["status"]
     assert current["task_id"] == task1
@@ -403,12 +425,11 @@ def test_full_lifecycle_submit_review_rework_approve_complete(client):
     assert manager_approval.status_code == 201, manager_approval.text
     assert manager_approval.json()["final_task_status"] == "completed"
     current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers).json()
-    # Technical evaluations increased difficulty. The next path entry is a
-    # simulation-owned task with advanced scope, while the shared canonical
-    # task remains unchanged.
+    # The recent technical average includes both the initial changes-required
+    # review and the approved resubmission, so the generated successor uses
+    # the resulting beginner difficulty.
     assert current["task_id"] != task2, current
-    assert current["difficulty"] == "advanced", current
-    assert "Advanced" in current["title"], current
+    assert current["difficulty"] == "beginner", current
     assert client.post(f"/api/simulations/{sim_id}/tasks/{current['task_id']}/start", headers=headers).status_code == 200
 
 

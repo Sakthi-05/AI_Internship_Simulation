@@ -16,7 +16,7 @@ from app.models.company import Company
 from app.models.enums import ReviewResult, ReviewSeverity, ReviewStatus, SubmissionStatus, TaskStatus
 from app.models.project import Project
 from app.models.sprint import Sprint
-from app.models.submission import AIReview, Submission, SubmissionVersion
+from app.models.submission import AIReview, ReviewHistory, Submission, SubmissionVersion
 from app.models.task import Task
 from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.ai.review_service import ReviewEvaluationError, ReviewService
@@ -83,6 +83,14 @@ async def create_review(
         .where(AIReview.version_id == version.id)
         .order_by(AIReview.created_at.desc())
     ).scalars().first()
+    if (
+        version.version_number != version.submission.current_version
+        and not (existing_review is not None and existing_review.status == ReviewStatus.COMPLETED)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This submission version is no longer current and cannot affect task progression.",
+        )
     if existing_review is not None and existing_review.status == ReviewStatus.IN_PROGRESS:
         started_at = existing_review.updated_at or existing_review.created_at
         if started_at is not None and started_at.tzinfo is None:
@@ -171,7 +179,7 @@ async def create_review(
             failed_model = exc.model
         else:
             failure_category = "review_processing_failed"
-            failure_message = "Technical review could not complete. No score was assigned."
+            failure_message = "Technical review could not complete. Your submission is saved and no score was assigned; retry is available."
             failed_provider = getattr(ai_service, "provider_name", "unconfigured")
             failed_model = getattr(ai_service, "model", None)
         review.raw_payload = {
@@ -260,6 +268,17 @@ async def create_manager_review(
         select(AIReview).where(AIReview.version_id == version.id)
         .order_by(AIReview.created_at.desc())
     ).scalars().first()
+    manager_history = db.execute(
+        select(ReviewHistory).where(
+            ReviewHistory.review_id == technical_review.id,
+            ReviewHistory.action == "manager_review",
+        )
+    ).first() if technical_review else None
+    if version.version_number != version.submission.current_version and manager_history is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This submission version is no longer current and cannot affect task progression.",
+        )
     raw = technical_review.raw_payload or {} if technical_review else {}
     if (
         technical_review is None
@@ -270,7 +289,10 @@ async def create_manager_review(
             status_code=status.HTTP_409_CONFLICT,
             detail="A completed provider evaluation is required before manager approval.",
         )
-    expected = [str(value).strip() for value in (version.submission.task.acceptance_criteria or []) if str(value).strip()]
+    expected = (version.version_metadata or {}).get("acceptance_criteria_snapshot")
+    if not isinstance(expected, list):
+        expected = version.submission.task.acceptance_criteria or []
+    expected = [str(value).strip() for value in expected if str(value).strip()]
     criteria = raw.get("acceptance_criteria") or []
     if expected and (
         len(criteria) != len(expected)

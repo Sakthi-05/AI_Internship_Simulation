@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.company import Company
+from app.models.criteria_version import AcceptanceCriteriaVersion
 from app.models.project import Project
 from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
@@ -201,6 +203,44 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
         except Exception:
             file_content = ""
     metadata = version.version_metadata or {}
+    criteria_snapshot = metadata.get("acceptance_criteria_snapshot")
+    criteria_version = metadata.get("acceptance_criteria_version")
+    if not isinstance(criteria_snapshot, list):
+        # Older submissions stored only the criteria-version identity. Recover
+        # that immutable snapshot when possible instead of using today's
+        # active criteria for a historical review retry.
+        criteria_row = None
+        if isinstance(criteria_version, dict) and criteria_version.get("id"):
+            try:
+                criteria_row = db.get(AcceptanceCriteriaVersion, UUID(criteria_version["id"]))
+            except (TypeError, ValueError):
+                criteria_row = None
+        if criteria_row is None and isinstance(criteria_version, dict):
+            version_number = criteria_version.get("version_number")
+            if version_number is not None:
+                try:
+                    criteria_row = db.execute(
+                        select(AcceptanceCriteriaVersion).where(
+                            AcceptanceCriteriaVersion.task_id == task.id,
+                            AcceptanceCriteriaVersion.version_number == int(version_number),
+                        )
+                    ).scalars().first()
+                except (TypeError, ValueError):
+                    criteria_row = None
+        if criteria_row is not None:
+            criteria_snapshot = [
+                str(item.get("text")).strip()
+                for item in (criteria_row.items or [])
+                if isinstance(item, dict)
+                and str(item.get("text") or "").strip()
+                and item.get("state") != "superseded"
+            ]
+            criteria_version = criteria_version or {
+                "id": str(criteria_row.id),
+                "version_number": criteria_row.version_number,
+                "status": criteria_row.status,
+                "implicit": False,
+            }
     meta_text = metadata_evidence_text(metadata)
     test_results = "\n".join(
         f"{key}: {metadata[key]}"
@@ -233,8 +273,16 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
     return {
         "task_title": task.title,
         "task_description": (task.description or "")[:500],
-        "acceptance_criteria": _review_criteria(db, task)[:8],
-        "acceptance_criteria_version": _criteria_identity(db, task),
+        # Review exactly the requirements visible when this version was
+        # submitted. A later requirement change must not rewrite its rubric.
+        "acceptance_criteria": (
+            [str(item).strip() for item in criteria_snapshot if str(item).strip()][:8]
+            if isinstance(criteria_snapshot, list)
+            else _review_criteria(db, task)[:8]
+        ),
+        "acceptance_criteria_version": (
+            criteria_version if isinstance(criteria_version, dict) else _criteria_identity(db, task)
+        ),
         "technology_stack": list(project.technology_stack or [])[:6],
         "has_work_evidence": has_work_evidence,
         "evidence_level": evidence_level,

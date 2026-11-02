@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiClient } from "../api/client";
 import { useSimulation } from "../context/SimulationContext";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from "recharts";
@@ -13,9 +13,12 @@ export default function Intelligence() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [sectionErrors, setSectionErrors] = useState({});
+  const refreshSequence = useRef(0);
+  const hasLoaded = useRef(false);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
+    const requestSequence = ++refreshSequence.current;
+    if (!hasLoaded.current) setLoading(true);
     setMessage("");
     const scope = simulation?.id ? `?simulation_id=${simulation.id}` : "";
     const results = await Promise.allSettled([
@@ -25,6 +28,9 @@ export default function Intelligence() {
       apiClient.get("/api/intelligence/certificates"),
       simulation?.id ? apiClient.get(`/api/simulations/${simulation.id}`) : Promise.resolve({ data: null }),
     ]);
+    // An older request may finish after a WebSocket-triggered refresh. Do not
+    // let its stale snapshot overwrite the newer persisted state.
+    if (requestSequence !== refreshSequence.current) return;
     const names = ["analytics", "feedback", "readiness", "certificates", "internship"];
     const nextErrors = {};
     results.forEach((result, index) => {
@@ -37,9 +43,30 @@ export default function Intelligence() {
     if (results[2].status === "fulfilled") setReadiness(results[2].value.data);
     if (results[3].status === "fulfilled") setCertificates(results[3].value.data.certificates || []);
     if (results[4].status === "fulfilled") setCurrentSimulation(results[4].value.data);
+    hasLoaded.current = true;
     setLoading(false);
   }, [simulation?.id]);
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    hasLoaded.current = false;
+    setData(null);
+    setFeedback(null);
+    setReadiness(null);
+    setCurrentSimulation(null);
+    setLoading(true);
+    refresh();
+  }, [refresh]);
+  useEffect(() => {
+    const refreshWhenUpdated = () => refresh();
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("aiwse:workspace-updated", refreshWhenUpdated);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("aiwse:workspace-updated", refreshWhenUpdated);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [refresh]);
 
   const generateFeedback = async () => {
     setMessage("");

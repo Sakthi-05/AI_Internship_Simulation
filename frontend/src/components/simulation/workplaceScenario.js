@@ -19,7 +19,7 @@ export function workplacePhase(event) {
   if (!event.response) return "reply";
   const described = (event.subsequent_actions || []).some((item) => item.action === "adapted_work");
   if (!described) return "adapt";
-  return "assessed";
+  return event.assessment?.adaptability?.status === "scored" ? "assessed" : "verify";
 }
 
 export function popupRequired(event) {

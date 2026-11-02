@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
+import { invalidateWorkspaceQueries } from "../lib/workspaceSync";
 
 /**
  * Simulation API hooks for Member 2 workflow
@@ -139,10 +140,8 @@ export function useTaskEvents(simulationId, taskId) {
   });
 }
 
-function refreshWorkplace(queryClient, simulationId, taskId) {
-  queryClient.invalidateQueries({ queryKey: ["taskEvents", simulationId, taskId] });
-  queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
-  queryClient.invalidateQueries({ queryKey: ["chat", "manager"] });
+function refreshWorkplace(queryClient) {
+  return invalidateWorkspaceQueries(queryClient);
 }
 
 export function useRespondToEvent(simulationId, taskId) {
@@ -158,7 +157,7 @@ export function useRespondToEvent(simulationId, taskId) {
       );
       return res.data;
     },
-    onSuccess: () => refreshWorkplace(queryClient, simulationId, taskId),
+    onSuccess: () => refreshWorkplace(queryClient),
   });
 }
 
@@ -171,7 +170,7 @@ export function useAcknowledgeEvent(simulationId, taskId) {
       );
       return res.data;
     },
-    onSuccess: () => refreshWorkplace(queryClient, simulationId, taskId),
+    onSuccess: () => refreshWorkplace(queryClient),
   });
 }
 
@@ -185,7 +184,7 @@ export function useRecordWorkplaceAction(simulationId, taskId) {
       );
       return res.data;
     },
-    onSuccess: () => refreshWorkplace(queryClient, simulationId, taskId),
+    onSuccess: () => refreshWorkplace(queryClient),
   });
 }
 

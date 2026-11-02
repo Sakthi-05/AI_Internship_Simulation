@@ -362,7 +362,10 @@ def test_templates_cover_every_category():
 
     engine = _ce(os.environ["DATABASE_URL"])
     with engine.connect() as conn:
-        row = conn.execute(text("SELECT id FROM companies LIMIT 1")).fetchone()
+        row = conn.execute(text(
+            "SELECT companies.id FROM companies "
+            "JOIN team_members ON team_members.company_id = companies.id LIMIT 1"
+        )).fetchone()
     assert row is not None
 
     db = SessionLocal()

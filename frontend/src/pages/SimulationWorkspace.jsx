@@ -20,6 +20,7 @@ import {
 } from "../hooks/useSimulationApi";
 import { useCompany, useProject, useGenerateSimulation } from "../hooks/useApi";
 import { useAuth } from "../context/AuthContext";
+import { invalidateWorkspaceQueries } from "../lib/workspaceSync";
 import LoadingScreen from "../components/LoadingScreen";
 import ScenarioPanel from "../components/simulation/ScenarioPanel";
 import TaskPanel from "../components/simulation/TaskPanel";
@@ -82,6 +83,7 @@ export default function SimulationWorkspace() {
     try {
       await apiClient.post(`/api/simulations/${idToUse}/start`);
       setSimulation(prev => ({ ...prev, id: idToUse, status: "in_progress" }));
+      await invalidateWorkspaceQueries(queryClient);
       // Invalidate all relevant queries so the workspace fetches fresh data
       queryClient.invalidateQueries({ queryKey: ["simulation", idToUse] });
       queryClient.invalidateQueries({ queryKey: ["currentTask", idToUse] });
@@ -150,6 +152,7 @@ export default function SimulationWorkspace() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["board", simulation?.projectId] }),
         queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] }),
+        queryClient.invalidateQueries({ queryKey: ["taskEvents", simulationId, currentTaskData?.task_id] }),
       ]);
       if (result.version_id && simulation?.projectId) {
         try {
@@ -176,6 +179,7 @@ export default function SimulationWorkspace() {
         queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] }),
         queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] }),
       ]);
+      await invalidateWorkspaceQueries(queryClient);
       // Check if simulation completed
       if (result.simulation_completed || result.status === "simulation_completed") {
         setSimulationCompleted(true);
@@ -198,6 +202,7 @@ export default function SimulationWorkspace() {
       queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] });
       queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
       queryClient.invalidateQueries({ queryKey: ["board", simulation?.projectId] });
+      await invalidateWorkspaceQueries(queryClient);
       if (result.status === "simulation_completed") {
         setSimulationCompleted(true);
       }
@@ -223,6 +228,7 @@ export default function SimulationWorkspace() {
         queryClient.invalidateQueries({ queryKey: ["board", simulation?.projectId] }),
         queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] }),
       ]);
+      await invalidateWorkspaceQueries(queryClient);
     } catch (error) {
       setActionError(error.message || "Technical review could not be retried. Your submission remains saved.");
     }

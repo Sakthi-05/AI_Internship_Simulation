@@ -369,7 +369,7 @@ class TestRequirementChangeEvent:
             task.status = TaskStatus.IN_PROGRESS
             db.add(task)
             db.flush()
-            event = asyncio.get_event_loop().run_until_complete(
+            event = asyncio.run(
                 trigger_requirement_change_event(
                     db, simulation, task, scenario,
                     original_requirement="Build a simple API",
@@ -377,7 +377,7 @@ class TestRequirementChangeEvent:
                     trigger_condition="mid_task_progress",
                 )
             )
-            duplicate = asyncio.get_event_loop().run_until_complete(
+            duplicate = asyncio.run(
                 trigger_requirement_change_event(
                     db, simulation, task, scenario,
                     original_requirement="Another original",
@@ -431,7 +431,7 @@ class TestDeadlineWarningEvent:
             scenario = db.get(Scenario, uuid.UUID(scenario_id))
             
             import asyncio
-            event = asyncio.get_event_loop().run_until_complete(
+            event = asyncio.run(
                 trigger_deadline_warning_event(
                     db, simulation, task, scenario,
                     remaining_minutes=5,
@@ -475,7 +475,7 @@ class TestEventResponse:
             scenario = db.get(Scenario, uuid.UUID(scenario_id))
             
             import asyncio
-            event = asyncio.get_event_loop().run_until_complete(
+            event = asyncio.run(
                 trigger_deadline_warning_event(
                     db, simulation, task, scenario,
                     remaining_minutes=5,
@@ -484,7 +484,7 @@ class TestEventResponse:
             db.commit()
             
             # Respond to event
-            updated_event = asyncio.get_event_loop().run_until_complete(
+            updated_event = asyncio.run(
                 respond_to_workflow_event(
                     db, event.id,
                     response="I acknowledge the change and will adapt my implementation.",

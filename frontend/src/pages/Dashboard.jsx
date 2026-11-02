@@ -11,9 +11,11 @@ import {
 } from "../hooks/useApi";
 import { STATUS_ORDER, STATUS_META, PRIORITY_META } from "../lib/status";
 import LoadingScreen from "../components/LoadingScreen";
+import { useSimulation as useSimulationQuery } from "../hooks/useSimulationApi";
 
 export default function Dashboard() {
   const { simulation } = useSimulation();
+  const { data: simulationState } = useSimulationQuery(simulation?.id);
   const { data: company, isLoading: companyLoading } = useCompany(simulation?.companyId);
   const { data: manager } = useManager(simulation?.companyId);
   const { data: project, isLoading: projectLoading } = useProject(simulation?.projectId);
@@ -54,7 +56,7 @@ export default function Dashboard() {
   const velocity = totalTasks ? Math.round((completedTasks / Math.max(state?.current_sprint_number ?? 1, 1)) * 10) / 10 : 0;
   const recentTasks = STATUS_ORDER.flatMap((status) => (board?.[status] || []).map((task) => ({ ...task, status })))
     .filter((task) => task.status !== "completed")
-    .sort((a, b) => (a.sequence ?? Number.MAX_SAFE_INTEGER) - (b.sequence ?? Number.MAX_SAFE_INTEGER))
+    .sort((a, b) => Number(Boolean(b.is_current)) - Number(Boolean(a.is_current)) || (a.sequence ?? Number.MAX_SAFE_INTEGER) - (b.sequence ?? Number.MAX_SAFE_INTEGER))
     .slice(0, 4);
   const recentActivity = [...(timeline || [])].slice(-5).reverse();
 
@@ -78,7 +80,7 @@ export default function Dashboard() {
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <span className="chip chip-glow">{project.role}</span>
-              <span className="chip capitalize">{project.difficulty} track</span>
+              <span className="chip capitalize">{simulationState?.difficulty || project.difficulty} track</span>
             </div>
             {(company.technology_stack || []).length > 0 && (
               <div className="mt-4 flex flex-wrap gap-1.5">
@@ -89,7 +91,7 @@ export default function Dashboard() {
             )}
           </div>
           <div className="hero-progress">
-            <div className="hero-progress-copy"><span className="hero-progress-label">Overall progress</span><strong>{completedTasks}<small> / {totalTasks} tasks</small></strong><span className="hero-progress-sprint">Sprint {state?.current_sprint_number ?? 1} <i>·</i> {sprints ? sprints.length : "—"} planned</span></div>
+            <div className="hero-progress-copy"><span className="hero-progress-label">Overall progress</span><strong>{completedTasks}<small> / {totalTasks} tasks</small></strong><span className="hero-progress-sprint">Sprint {simulationState?.current_sprint_number ?? state?.current_sprint_number ?? 1} <i>·</i> {sprints ? sprints.length : "—"} planned</span></div>
             <div className="relative h-[92px] w-[92px] shrink-0">
               <svg viewBox="0 0 64 64" className="h-full w-full -rotate-90">
                 <circle cx="32" cy="32" r="26" fill="none" stroke="#E5E7EB" strokeWidth="6" />
@@ -214,7 +216,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.15fr_.85fr]">
         <section className="card p-5">
           <div className="mb-4 flex items-center justify-between gap-3"><div><p className="eyebrow">Your workload</p><h2 className="mt-1 font-display text-base font-semibold">Tasks in progress</h2><p className="mt-1 text-xs text-text-faint">A quick look at the next items on your board.</p></div><Link to="/board" className="btn-ghost">Open board <span aria-hidden="true">↗</span></Link></div>
-          {recentTasks.length ? <div className="dashboard-task-list">{recentTasks.map((task) => <article className="dashboard-task-row" key={task.id}><span className="task-status-marker" style={{ backgroundColor: chartColors[task.status] || "#94A3B8" }}/><div className="min-w-0 flex-1"><h3 className="truncate text-sm font-semibold">{task.title}</h3><p className="mt-1 text-[11px] text-text-faint">#{task.sequence} <span className="mx-1">·</span> {task.estimated_hours}h estimated</p></div><div className="flex shrink-0 flex-col items-end gap-1"><span className="task-status-pill" style={{ color: chartColors[task.status] || "#64748B", backgroundColor: `color-mix(in srgb, ${chartColors[task.status] || "#64748B"} 10%, white)` }}>{STATUS_META[task.status]?.label || task.status.replaceAll("_", " ")}</span><span className="text-[10px] text-text-faint">{PRIORITY_META[task.priority]?.label || "Priority not set"}</span></div></article>)}</div> : <p className="rounded-lg bg-surface-3 px-4 py-6 text-center text-sm text-text-muted">No open tasks are currently on your board.</p>}
+          {recentTasks.length ? <div className="dashboard-task-list">{recentTasks.map((task) => <article className="dashboard-task-row" key={task.id}><span className="task-status-marker" style={{ backgroundColor: chartColors[task.status] || "#94A3B8" }}/><div className="min-w-0 flex-1"><h3 className="truncate text-sm font-semibold">{task.title}</h3><p className="mt-1 text-[11px] text-text-faint">{task.is_current ? "Current task · " : ""}#{task.sequence} <span className="mx-1">·</span> {task.estimated_hours}h estimated</p></div><div className="flex shrink-0 flex-col items-end gap-1"><span className="task-status-pill" style={{ color: chartColors[task.status] || "#64748B", backgroundColor: `color-mix(in srgb, ${chartColors[task.status] || "#64748B"} 10%, white)` }}>{STATUS_META[task.status]?.label || task.status.replaceAll("_", " ")}</span><span className="text-[10px] text-text-faint">{PRIORITY_META[task.priority]?.label || "Priority not set"}</span></div></article>)}</div> : <p className="rounded-lg bg-surface-3 px-4 py-6 text-center text-sm text-text-muted">No open tasks are currently on your board.</p>}
         </section>
 
         <section className="card p-5">

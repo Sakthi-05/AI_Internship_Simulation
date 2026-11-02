@@ -203,7 +203,7 @@ class TestScenarioProgressionRegression:
             import asyncio
             from app.models.task import Task
             completed_task = db.get(Task, task_ids[0])
-            next_task = asyncio.get_event_loop().run_until_complete(
+            next_task = asyncio.run(
                 progress_to_next_task(db, simulation, completed_task, "regression_student")
             )
             db.commit()
@@ -266,7 +266,7 @@ class TestScenarioProgressionRegression:
             simulation = db.get(Simulation, sim_id)
             from app.models.task import Task
             completed_task = db.get(Task, task_ids[2])
-            next_task = asyncio.get_event_loop().run_until_complete(
+            next_task = asyncio.run(
                 progress_to_next_task(db, simulation, completed_task, "regression_student")
             )
             db.commit()
@@ -332,7 +332,7 @@ class TestScenarioProgressionRegression:
             simulation = db.get(Simulation, sim_id)
             from app.models.task import Task
             completed_task = db.get(Task, task_ids[5])
-            next_task = asyncio.get_event_loop().run_until_complete(
+            next_task = asyncio.run(
                 progress_to_next_task(db, simulation, completed_task, "regression_student")
             )
             db.commit()
@@ -375,7 +375,7 @@ class TestScenarioProgressionRegression:
             _set_task_status(db, task_ids[2], TaskStatus.BACKLOG)
             
             scenario = db.get(Scenario, scenario1_id)
-            is_complete = asyncio.get_event_loop().run_until_complete(
+            is_complete = asyncio.run(
                 check_scenario_completion(db, simulation, scenario)
             )
             assert is_complete is False, "Scenario should NOT be complete when tasks remain"
@@ -385,7 +385,7 @@ class TestScenarioProgressionRegression:
                 _set_task_status(db, tid, TaskStatus.COMPLETED)
             
             scenario = db.get(Scenario, scenario1_id)
-            is_complete = asyncio.get_event_loop().run_until_complete(
+            is_complete = asyncio.run(
                 check_scenario_completion(db, simulation, scenario)
             )
             assert is_complete is True, "Scenario should be complete when all tasks are done"
@@ -430,7 +430,7 @@ class TestScenarioProgressionRegression:
             simulation = db.get(Simulation, sim_id)
             from app.models.task import Task
             completed_task = db.get(Task, task_ids[0])
-            next_task = asyncio.get_event_loop().run_until_complete(
+            next_task = asyncio.run(
                 progress_to_next_task(db, simulation, completed_task, "regression_student")
             )
             db.commit()

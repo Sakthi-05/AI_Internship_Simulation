@@ -65,6 +65,9 @@ export default function WorkplaceSimulation({
               <div key={`${item.at || index}-${index}`}>
                 <p className="text-xs text-text-faint">Adaptation you recorded</p>
                 <p className="text-sm text-text">{item.detail}</p>
+                {item.criteria_version_number != null && (
+                  <p className="mt-1 text-[11px] text-text-faint">Saved for criteria version {item.criteria_version_number}</p>
+                )}
               </div>
             ))}
           </section>
@@ -117,7 +120,12 @@ export default function WorkplaceSimulation({
             </button>
           </form>
         )}
-        {(phase === "adapt" || phase === "assessed") && change?.assessment && (
+        {phase === "verify" && (
+          <p className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3 text-xs text-text-muted">
+            Your adaptation is saved. Submit task work that meets criteria version {change.criteria_version_number ?? "—"} to provide verifiable evidence.
+          </p>
+        )}
+        {(phase === "adapt" || phase === "verify" || phase === "assessed") && change?.assessment && (
           <AssessmentSummary assessment={change.assessment} />
         )}
         {otherEvents.length > 0 && (
@@ -125,8 +133,17 @@ export default function WorkplaceSimulation({
             <p className="text-xs font-semibold uppercase tracking-wider text-text-faint">Other workplace updates</p>
             {otherEvents.map((event) => (
               <div key={event.id} className="workplace-other-event rounded-lg border p-2.5">
-                <p className="text-sm text-text">{event.title || event.event_type}</p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm text-text">{event.title || event.event_type}</p>
+                  <span className="text-[10px] capitalize text-text-faint">{event.status}</span>
+                </div>
                 <p className="text-xs text-text-muted">{event.message}</p>
+                {(event.subsequent_actions || []).filter((item) => item.action === "adapted_work").map((item, index) => (
+                  <div key={`${item.at || index}-${index}`} className="mt-2 border-t border-white/[0.06] pt-2">
+                    <p className="text-[11px] text-text-faint">Adaptation saved for criteria v{item.criteria_version_number ?? "?"}</p>
+                    <p className="text-xs text-text-muted">{item.detail}</p>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
@@ -147,7 +164,7 @@ function AssessmentSummary({ assessment }) {
       <p>Adaptability: {observationLabel(assessment.adaptability)}</p>
       {assessment.status === "insufficient_evidence" && (
         <p className="mt-2 text-xs text-text-muted">
-          Scores stay unavailable until your reply and a later action both address the changed requirement.
+          Scores stay unavailable until a recorded reply, adaptation action, and submitted task artifact support this changed requirement.
         </p>
       )}
     </div>

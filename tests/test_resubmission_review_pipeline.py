@@ -474,3 +474,53 @@ def test_i_current_task_feedback_switches_to_the_second_version(client):
     assert done["review_feedback"]["version_number"] == 2
     assert done["review_feedback"]["is_previous_review"] is False
     assert done["review_feedback"]["summary"] == second.json()["summary"]
+
+
+def test_j_review_uses_the_criteria_snapshot_from_submission(client):
+    class _CriteriaCaptureReviewer(_ChangesReviewer):
+        def __init__(self):
+            self.prompt = ""
+
+        async def generate_json(self, prompt, system_prompt=None):
+            self.prompt = prompt
+            return _payload(52, "Criteria snapshot reviewed.", prompt)
+
+    flow = _two_attempt_flow(client)
+    db = SessionLocal()
+    try:
+        version = db.get(SubmissionVersion, flow["v2"])
+        task = db.get(Task, flow["task_id"])
+        snapshot = version.version_metadata["acceptance_criteria_snapshot"]
+        identity = version.version_metadata["acceptance_criteria_version"]
+        task.acceptance_criteria = ["A requirement introduced after this submission"]
+        db.commit()
+    finally:
+        db.close()
+
+    reviewer = _CriteriaCaptureReviewer()
+    response = _review(client, flow["headers"], flow["data"], flow["v2"], reviewer=reviewer)
+    assert response.status_code == 201, response.text
+    assert _criteria_from_prompt(reviewer.prompt) == snapshot
+    assert "A requirement introduced after this submission" not in reviewer.prompt
+    assert response.json()["raw"]["acceptance_criteria_version"] == identity
+
+
+def test_k_next_generated_task_uses_adapted_difficulty(client):
+    import asyncio
+    from app.models.simulation import Simulation
+    from app.models.sprint import Sprint
+    from app.services.generators.dynamic_task_generator import generate_dynamic_task
+
+    flow = _two_attempt_flow(client, marker_reviewer=True)
+    db = SessionLocal()
+    try:
+        simulation = db.get(Simulation, flow["sim_id"])
+        task = db.get(Task, flow["task_id"])
+        sprint = db.get(Sprint, task.sprint_id)
+        assert simulation.difficulty.value == "beginner"
+        next_task = asyncio.run(generate_dynamic_task(
+            db, simulation, sprint, flow["student_id"], previous_task=task
+        ))
+        assert next_task.difficulty == simulation.difficulty
+    finally:
+        db.close()

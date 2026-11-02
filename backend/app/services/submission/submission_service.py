@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -30,10 +30,22 @@ class SubmissionService:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         metadata = dict(metadata or {})
-        from app.services.criteria_version_service import criteria_identity
+        from app.services.criteria_version_service import criteria_identity, required_texts
 
-        metadata["acceptance_criteria_version"] = criteria_identity(db, task)
         files = files or []
+
+        # Serialize submissions for a task so two near-simultaneous requests
+        # cannot allocate the same version number or overwrite the current
+        # pointer. The route's normal status checks still decide eligibility.
+        locked_task = db.execute(
+            select(Task)
+            .where(Task.id == task.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one()
+        task = locked_task
+        metadata["acceptance_criteria_version"] = criteria_identity(db, task)
+        metadata["acceptance_criteria_snapshot"] = required_texts(db, task)
 
         try:
             validate_transition(task.status, TaskStatus.SUBMITTED)
@@ -46,7 +58,12 @@ class SubmissionService:
         submission = self._get_or_create_submission(db, task)
 
         # Determine the next version number
-        next_version = submission.current_version + 1
+        latest_version = db.execute(
+            select(func.max(SubmissionVersion.version_number)).where(
+                SubmissionVersion.submission_id == submission.id
+            )
+        ).scalar_one()
+        next_version = max(submission.current_version or 0, latest_version or 0) + 1
 
         # Store files using the file storage service
         stored_files: List[Dict[str, Any]] = []
@@ -136,7 +153,10 @@ class SubmissionService:
 
     def _get_or_create_submission(self, db: Session, task: Task) -> Submission:
         existing = db.execute(
-            select(Submission).where(Submission.task_id == task.id)
+            select(Submission)
+            .where(Submission.task_id == task.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).scalar_one_or_none()
 
         if existing:

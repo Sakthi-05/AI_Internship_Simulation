@@ -93,11 +93,47 @@ def test_project(db: Session, test_company):
     return project
 
 
-def test_dynamic_baseline_generation(db: Session, fresh_student):
+def test_dynamic_baseline_generation(db: Session, fresh_student, monkeypatch):
     """Test that baseline is generated dynamically based on student profile."""
     # Create student profile with specific skills
     from app.models.assessment import StudentSkill, Skill
     from app.services.assessment_service import ensure_skill_catalog, replace_student_skills
+    import app.services.assessment_service as assessment_service
+    from app.services.ai.ai_service import AIService
+
+    class _BaselineAI(AIService):
+        async def generate_text(self, prompt, system_prompt=None):
+            return "baseline"
+
+        async def generate_json(self, prompt, system_prompt=None):
+            prompts = [
+                ("How does Python resolve a module imported from a package subdirectory?", "technical_knowledge"),
+                ("Which FastAPI dependency pattern reuses a database session per request?", "technical_knowledge"),
+                ("How would you add an index to speed up this PostgreSQL lookup?", "problem_solving"),
+                ("What boundary case should a Python parser handle for an empty input?", "critical_thinking"),
+                ("Which FastAPI status code represents a missing resource response?", "technical_knowledge"),
+                ("How can a PostgreSQL transaction keep two related writes consistent?", "decision_making"),
+                ("What test isolates a Python function from its external HTTP dependency?", "problem_solving"),
+            ]
+            return {"questions": [
+                {
+                    "prompt": question,
+                    "competency": competency,
+                    "question_type": "mcq",
+                    "options": [
+                        {"id": "a", "text": "Option A"},
+                        {"id": "b", "text": "Option B"},
+                        {"id": "c", "text": "Option C"},
+                        {"id": "d", "text": "Option D"},
+                    ],
+                    "correct_option": "a",
+                    "rubric_keywords": [],
+                    "difficulty": "intermediate",
+                }
+                for question, competency in prompts
+            ]}
+
+    monkeypatch.setattr(assessment_service, "get_ai_service", lambda: _BaselineAI())
     
     ensure_skill_catalog(db)
     

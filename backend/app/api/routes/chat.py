@@ -38,9 +38,9 @@ from app.schemas.chat import (
 )
 
 # ✅ Correct imports
-from app.services.ai.ai_manager import generate_manager_reply
 from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.ai.ai_teammates import generate_teammate_reply
+from app.services.manager_communication_service import create_manager_response
 
 from app.services.activity_log_service import log_activity
 from app.websockets.manager import manager as ws_manager
@@ -77,7 +77,7 @@ async def get_manager_chat_history(
             Message.company_id == company_id,
             Message.sender_type.in_([MessageSenderType.STUDENT, MessageSenderType.MANAGER]),
         )
-        .order_by(Message.created_at)
+        .order_by(Message.created_at, Message.id)
     )
     return db.execute(stmt).scalars().all()
 
@@ -103,7 +103,7 @@ async def send_manager_message(
             Message.company_id == company_id,
             Message.sender_type.in_([MessageSenderType.STUDENT, MessageSenderType.MANAGER]),
         )
-        .order_by(Message.created_at)
+        .order_by(Message.created_at, Message.id)
     ).scalars().all()
 
     student_msg = Message(
@@ -112,31 +112,38 @@ async def send_manager_message(
     )
     db.add(student_msg)
     db.flush()
+    history.append(student_msg)
 
-    reply_text = await generate_manager_reply(ai_service, manager_row, project, state, history, payload.content)
-
-    reply_msg = Message(
-        company_id=company_id, sender_type=MessageSenderType.MANAGER,
-        sender_id=str(manager_row.id), content=reply_text,
-    )
-    db.add(reply_msg)
-
-    state.communication_frequency += 1
-    db.add(state)
-    log_activity(db, company_id, actor=user.student_id, action="chat:manager", detail=payload.content[:200])
-
+    workplace_context = "No active simulation task."
     from app.models.enums import SimulationStatus
     from app.models.simulation import Simulation
     from app.models.task import Task
-    from app.services.workplace_scenarios import announce_requirement_change, issue_requirement_change
-
     simulation = db.execute(
         select(Simulation).where(
             Simulation.project_id == project.id,
             Simulation.student_id == user.student_id,
             Simulation.status == SimulationStatus.IN_PROGRESS,
-        )
+        ).order_by(Simulation.created_at.desc())
     ).scalars().first()
+    if simulation is not None and simulation.current_task_id is not None:
+        current_task = db.get(Task, simulation.current_task_id)
+        if current_task is not None:
+            workplace_context = (
+                f"Current task: {current_task.title}. Status: {current_task.status.value}. "
+                f"Description: {current_task.description or 'No description provided.'}. "
+                f"Acceptance criteria: {current_task.acceptance_criteria or 'No criteria provided.'}"
+            )
+    reply_msg = await create_manager_response(
+        db, ai_service, manager_row, project, state, history, payload.content,
+        workplace_context,
+    )
+
+    state.communication_frequency += 1
+    db.add(state)
+    log_activity(db, company_id, actor=user.student_id, action="chat:manager", detail=payload.content[:200])
+
+    from app.services.workplace_scenarios import announce_requirement_change, issue_requirement_change
+
     if simulation is not None and simulation.current_task_id is not None:
         work_task = db.get(Task, simulation.current_task_id)
         if work_task is not None and work_task.status == TaskStatus.IN_PROGRESS:
@@ -155,7 +162,7 @@ async def send_manager_message(
     for msg in (student_msg, reply_msg):
         await ws_manager.broadcast(str(company_id), "chat_message", {
             "channel": "manager", "id": str(msg.id), "sender_type": msg.sender_type.value,
-            "content": msg.content, "created_at": msg.created_at.isoformat(),
+            "sender_id": msg.sender_id, "content": msg.content, "created_at": msg.created_at.isoformat(),
         })
 
     return ChatExchange(student_message=student_msg, reply=reply_msg)

@@ -1,6 +1,7 @@
 import os
 import uuid
 import json
+from sqlalchemy.engine import make_url
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +9,25 @@ from jose import jwt
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://aiwse:aiwse_password@localhost:5432/aiwse_test_db")
+TEST_DATABASE_NAME = "aiwse_chunk10_test"
+test_database_url = os.environ.get("TEST_DATABASE_URL")
+if not test_database_url:
+    raise RuntimeError(
+        "TEST_DATABASE_URL is required. Point it at the disposable "
+        f"'{TEST_DATABASE_NAME}' database; tests must never use DATABASE_URL implicitly."
+    )
+parsed_test_url = make_url(test_database_url)
+if parsed_test_url.database != TEST_DATABASE_NAME:
+    raise RuntimeError(
+        f"Refusing destructive test fixtures for database {parsed_test_url.database!r}; "
+        f"expected the dedicated disposable database {TEST_DATABASE_NAME!r}."
+    )
+if parsed_test_url.drivername != "postgresql+psycopg":
+    raise RuntimeError("TEST_DATABASE_URL must use the PostgreSQL psycopg driver.")
+if parsed_test_url.host not in {"localhost", "127.0.0.1", "::1"}:
+    raise RuntimeError("Refusing destructive test fixtures against a non-local PostgreSQL host.")
+os.environ["DATABASE_URL"] = test_database_url
+os.environ["ENVIRONMENT"] = "test"
 os.environ.setdefault("JWT_SECRET_KEY", "change-me-to-the-shared-signing-secret")
 
 from app.core.config import settings  # noqa: E402
@@ -18,7 +37,16 @@ from app.main import app  # noqa: E402
 
 @pytest.fixture(scope="session", autouse=True)
 def _setup_database():
-    """Create a clean schema once per test session against a real Postgres DB."""
+    """Create/drop test tables only inside the dedicated disposable database."""
+    with app_engine.connect() as conn:
+        database_name, schema_name = conn.execute(
+            text("SELECT current_database(), current_schema()")
+        ).one()
+    if database_name != TEST_DATABASE_NAME or schema_name != "public":
+        raise RuntimeError(
+            "Refusing destructive test fixture: connected to "
+            f"{database_name}.{schema_name}, expected {TEST_DATABASE_NAME}.public."
+        )
     Base.metadata.create_all(bind=app_engine)
     # A leftover test schema can still have the one-row requirement-change
     # index. Swap it for the open-event index without dropping stored rows.
@@ -47,6 +75,15 @@ def _setup_database():
         conn.execute(text("ALTER TYPE event_type_enum ADD VALUE IF NOT EXISTS 'SPRINT_COMPLETED'"))
         conn.execute(text("ALTER TYPE event_type_enum ADD VALUE IF NOT EXISTS 'sprint_completed'"))
     yield
+    with app_engine.connect() as conn:
+        database_name, schema_name = conn.execute(
+            text("SELECT current_database(), current_schema()")
+        ).one()
+    if database_name != TEST_DATABASE_NAME or schema_name != "public":
+        raise RuntimeError(
+            "Refusing teardown outside the dedicated test database: "
+            f"connected to {database_name}.{schema_name}."
+        )
     with app_engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
             conn.execute(text(f'DROP TABLE IF EXISTS {table.name} CASCADE'))

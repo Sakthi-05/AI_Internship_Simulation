@@ -11,6 +11,7 @@ Proves that:
 """
 import uuid
 import os
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -139,6 +140,21 @@ def _seed_simulation(db, student_id, company_id, project_id):
     return sim_id
 
 
+def _project_for_simulation(client, headers, simulation_id):
+    response = client.get(f"/api/simulations/{simulation_id}", headers=headers)
+    assert response.status_code == 200, response.text
+    # This test helper needs the project scope for the board request; resolve
+    # it from the persisted simulation without duplicating setup identifiers.
+    db = SessionLocal()
+    try:
+        return str(db.execute(
+            text("SELECT project_id FROM simulations WHERE id = :id"),
+            {"id": simulation_id},
+        ).scalar_one())
+    finally:
+        db.close()
+
+
 def _seed_scenario(db, simulation_id, task_ids):
     now = datetime.now(timezone.utc)
     scenario_id = uuid.uuid4()
@@ -207,6 +223,106 @@ class TestPersonalisedTaskPathsAPI:
 
         path = client.get(f"/api/simulations/{sim_id}/task-path", headers=headers).json()
         assert len(path) == len(all_task_ids)
+
+    def test_path_builder_retry_preserves_the_existing_order(self):
+        """A retry after path persistence must not append duplicate entries."""
+        db = SessionLocal()
+        student_id = f"path_retry_{uuid.uuid4().hex[:8]}"
+        try:
+            company_id = _seed_company(db, student_id)
+            project_id = _seed_project(db, company_id)
+            task_ids = _seed_sprints_and_tasks(db, project_id, num_sprints=1, tasks_per_sprint=2)
+            sim_id = _seed_simulation(db, student_id, company_id, project_id)
+            first = build_task_path(db, sim_id, project_id, task_ids=task_ids)
+            db.commit()
+            retry = build_task_path(db, sim_id, project_id, task_ids=task_ids)
+            assert [item.task_id for item in retry] == [item.task_id for item in first]
+            assert len(retry) == 2
+        finally:
+            db.close()
+
+    def test_progression_retry_and_refresh_keep_one_current_task(self):
+        """Sequential advancement is persisted and stale retries cannot skip."""
+        from app.models.enums import TaskStatus
+        from app.models.simulation import Simulation
+        from app.services.simulation.progression_service import progress_to_next_task
+        from app.services.simulation.task_access_service import repair_current_task
+
+        db = SessionLocal()
+        student_id = f"progress_{uuid.uuid4().hex[:8]}"
+        try:
+            company_id = _seed_company(db, student_id)
+            project_id = _seed_project(db, company_id)
+            task_ids = _seed_sprints_and_tasks(db, project_id, num_sprints=1, tasks_per_sprint=2)
+            sim_id = _seed_simulation(db, student_id, company_id, project_id)
+            _seed_scenario(db, sim_id, task_ids)
+            path = build_task_path(db, sim_id, project_id, task_ids=task_ids)
+            simulation = db.get(Simulation, sim_id)
+            completed = db.get(Task, task_ids[0])
+            completed.status = TaskStatus.COMPLETED
+            completed.completed_at = datetime.now(timezone.utc)
+            simulation.current_task_id = completed.id
+            db.flush()
+
+            next_task = asyncio.run(progress_to_next_task(db, simulation, completed, student_id))
+            assert next_task.id == task_ids[1]
+            db.commit()
+
+            # Simulate reconnect/refresh by reloading authoritative state.
+            db.expire_all()
+            simulation = db.get(Simulation, sim_id)
+            assert repair_current_task(db, simulation).id == task_ids[1]
+            assert simulation.current_task_id == task_ids[1]
+            assert db.get(Task, task_ids[1]).status == TaskStatus.TODO
+
+            # A duplicate completion callback for the prior task must be inert.
+            prior = db.get(Task, task_ids[0])
+            assert asyncio.run(progress_to_next_task(db, simulation, prior, student_id)) is None
+            db.refresh(simulation)
+            assert simulation.current_task_id == task_ids[1]
+            assert len(path) == 2
+        finally:
+            db.close()
+
+    def test_current_task_board_progress_and_simulation_apis_agree_after_refresh(self, client):
+        student_id = f"sync_{uuid.uuid4().hex[:8]}"
+        db = SessionLocal()
+        try:
+            sim_id, task_ids = _full_setup(db, student_id, num_sprints=2, tasks_per_sprint=2)
+        finally:
+            db.close()
+        headers = _headers(student_id)
+        started = client.post(
+            f"/api/simulations/{sim_id}/start",
+            headers=headers,
+            json={"task_ids": task_ids},
+        )
+        assert started.status_code == 200, started.text
+
+        current = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers)
+        progress = client.get(f"/api/simulations/{sim_id}/progress", headers=headers)
+        simulation = client.get(f"/api/simulations/{sim_id}", headers=headers)
+        path = client.get(f"/api/simulations/{sim_id}/task-path", headers=headers)
+        board = client.get(
+            f"/api/projects/{_project_for_simulation(client, headers, sim_id)}/board?simulation_id={sim_id}",
+            headers=headers,
+        )
+        assert all(response.status_code == 200 for response in (current, progress, simulation, path, board))
+
+        current_task_id = current.json()["task_id"]
+        assert progress.json()["current_task_id"] == current_task_id
+        assert simulation.json()["current_task_id"] == current_task_id
+        assert simulation.json()["current_task"]["id"] == current_task_id
+        assert [entry["task_id"] for entry in path.json()] == task_ids
+        board_tasks = [task for group in board.json().values() for task in group]
+        assert {task["id"] for task in board_tasks} == set(task_ids)
+        assert [task["id"] for task in board_tasks if task.get("is_current")] == [current_task_id]
+        assert progress.json()["current_sprint_number"] == 1
+
+        # A fresh read must restore the same persisted task rather than a local
+        # candidate or a task from another path.
+        refreshed = client.get(f"/api/simulations/{sim_id}/tasks/current", headers=headers)
+        assert refreshed.json()["task_id"] == current_task_id
 
     def test_task_path_returns_ordered_entries(self, client):
         """GET /task-path returns entries with sequence 1..N."""

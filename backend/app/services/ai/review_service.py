@@ -16,10 +16,8 @@ from app.models.enums import ReviewResult, ReviewStatus, ReviewSeverity, Submiss
 from app.models.manager import Manager
 from app.models.project import Project
 from app.models.project_state import ProjectState
-from app.models.sprint import Sprint
 from app.models.submission import AIReview, ReviewHistory, SubmissionVersion
 from app.models.task import Task
-from app.models.task_path import SimulationTaskPath
 from app.schemas.review import AIManagerDecision, AIReviewResponse
 from app.services.ai.ai_service import AIProviderResponseError, AIService, MalformedAIJSONError, MockAIService
 from app.services.ai.prompt_builder import build_review_prompt
@@ -359,6 +357,8 @@ class ReviewService:
                 "score": None,
                 "summary": "Technical review is in progress.",
             }
+        if version.version_number != version.submission.current_version:
+            raise ValueError("This submission version is no longer current and cannot affect task progression.")
 
         # Persist the claim before awaiting the provider so retries can observe
         # the in-flight state and avoid evaluating the same version twice.
@@ -472,6 +472,7 @@ class ReviewService:
                 raise ReviewEvaluationError("malformed_response", provider, model, exc) from exc
 
         review_payload["evaluation_source"] = evaluation_source
+        review_payload["acceptance_criteria_version"] = context.get("acceptance_criteria_version")
         if attempt_history:
             review_payload["attempt_history"] = attempt_history
 
@@ -631,35 +632,42 @@ class ReviewService:
                 {"task_id": str(task.id), "review_id": str(ai_review.id), "result": ai_review.result.value},
             )
 
-        # DYNAMIC NEXT TASK GENERATION AFTER APPROVED REVIEW
-        # When a task is approved, generate the next dynamic task based on:
-        # - Current sprint objective (if not complete)
-        # - Next sprint objective (if current sprint is complete)
-        # - Recent performance trend
-        # - Updated competencies from this review
-        # - This ensures the next task is contextual to actual student performance
+        # Generate a contextual follow-up only when this task has no saved
+        # successor. The review service may be retried, so the predecessor
+        # marker is the idempotency key. Current-task ownership remains with
+        # progression_service, which consumes this ordered path entry.
         if ai_review.result == ReviewResult.APPROVED and simulation is not None:
+            from app.models.task_path import SimulationTaskPath
+            from app.models.sprint import Sprint
             from app.services.generators.dynamic_task_generator import generate_dynamic_task
-            from app.services.simulation.progression_service import calculate_sprint_progress
-            
-            # Get current sprint for the task
+            from app.services.simulation.progression_service import calculate_sprint_progress, _activate_sprint
+
+            db.execute(
+                select(Simulation).where(Simulation.id == simulation.id).with_for_update()
+            ).scalar_one()
+            prior_generated = db.execute(
+                select(SimulationTaskPath.id)
+                .join(Task, Task.id == SimulationTaskPath.task_id)
+                .where(
+                    SimulationTaskPath.simulation_id == simulation.id,
+                    Task.task_metadata["previous_task_id"].as_string() == str(task.id),
+                )
+            ).first()
+            unfinished_successor = db.execute(
+                select(SimulationTaskPath.id)
+                .join(Task, Task.id == SimulationTaskPath.task_id)
+                .where(
+                    SimulationTaskPath.simulation_id == simulation.id,
+                    Task.id != task.id,
+                    Task.status != TaskStatus.COMPLETED,
+                )
+            ).first()
             current_sprint = db.get(Sprint, task.sprint_id)
-            
-            if current_sprint:
-                # Check sprint objective progress before generating next task
+            if not prior_generated and not unfinished_successor and current_sprint:
                 sprint_progress = calculate_sprint_progress(db, simulation, current_sprint.id)
-                
-                target_sprint = None
-                reason_for_sprint = ""
-                
-                if not sprint_progress["objective_complete"]:
-                    # Current sprint still has work to do — generate next task in current sprint
-                    target_sprint = current_sprint
-                    reason_for_sprint = f"current sprint objective in progress ({sprint_progress['progress_percentage']}%)"
-                else:
-                    # Current sprint objective is complete — check for a NEXT sprint
-                    # Do NOT generate another task for the already-completed sprint
-                    next_sprint = db.execute(
+                target_sprint = current_sprint
+                if sprint_progress["objective_complete"]:
+                    target_sprint = db.execute(
                         select(Sprint)
                         .where(
                             Sprint.project_id == current_sprint.project_id,
@@ -667,68 +675,30 @@ class ReviewService:
                         )
                         .order_by(Sprint.sprint_number.asc())
                     ).scalars().first()
-                    
-                    if next_sprint:
-                        # There is a next sprint — generate the first task for it
-                        target_sprint = next_sprint
-                        reason_for_sprint = (
-                            f"current sprint {current_sprint.sprint_number} objective achieved, "
-                            f"advancing to next sprint {next_sprint.sprint_number}: {next_sprint.goal}"
-                        )
-                        
-                        # Activate the next sprint so it becomes visible
-                        from app.services.simulation.progression_service import _activate_sprint
-                        _activate_sprint(db, next_sprint.id)
-                    else:
-                        # No more sprints — project/sprints all complete
-                        # Let the progression engine handle simulation completion naturally
-                        logger.info(
-                            "All sprints complete after approved review review_id=%s task_id=%s",
-                            ai_review.id, task.id,
-                        )
-                
-                if target_sprint is not None:
+                    if target_sprint:
+                        _activate_sprint(db, target_sprint.id)
+                if target_sprint:
                     try:
-                        # Generate next dynamic task based on this completed task
-                        # (Uses latest competencies, performance trend, and target sprint's goal)
                         next_task = await generate_dynamic_task(
-                            db=db,
-                            simulation=simulation,
-                            sprint=target_sprint,
-                            student_id=version.submission.student_id,
-                            previous_task=task,  # Pass current task as previous for context/dependency
+                            db, simulation, target_sprint, version.submission.student_id, task
                         )
-                        next_task.status = TaskStatus.BACKLOG
-                        db.add(next_task)
-                        
-                        # Create path entry for the new dynamic task
                         max_seq = db.execute(
                             select(SimulationTaskPath.sequence)
                             .where(SimulationTaskPath.simulation_id == simulation.id)
                             .order_by(SimulationTaskPath.sequence.desc())
                         ).scalars().first() or 0
-                        
-                        new_path_entry = SimulationTaskPath(
+                        db.add(SimulationTaskPath(
                             simulation_id=simulation.id,
                             task_id=next_task.id,
                             sequence=max_seq + 1,
                             status=TaskStatus.BACKLOG,
-                        )
-                        db.add(new_path_entry)
+                        ))
                         db.flush()
-                        
-                        logger.info(
-                            "Dynamic next task generated review_id=%s task_id=%s next_task_id=%s reason=%s sprint=%s",
-                            ai_review.id, task.id, next_task.id, reason_for_sprint,
-                            f"Sprint {target_sprint.sprint_number}",
-                        )
                     except Exception as exc:
                         logger.warning(
-                            "Failed to generate dynamic next task after review review_id=%s task_id=%s: %s",
+                            "Failed to generate follow-up task review_id=%s task_id=%s: %s",
                             ai_review.id, task.id, exc, exc_info=True,
                         )
-                        # Don't fail the review if task generation fails — the student can still complete the task
-                        # and progression engine will fall back to static path or retry later.
 
         db.commit()
         logger.info(
@@ -800,6 +770,9 @@ class ReviewService:
                 "manager_feedback": decision.get("feedback", ""),
                 "final_task_status": task.status.value,
             }
+
+        if version.version_number != version.submission.current_version:
+            raise ValueError("This submission version is no longer current and cannot affect task progression.")
 
         # Get manager and project state
         manager = db.execute(

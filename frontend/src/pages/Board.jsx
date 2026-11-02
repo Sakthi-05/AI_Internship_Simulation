@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { useSimulation } from "../context/SimulationContext";
@@ -23,6 +23,12 @@ export default function Board() {
     () => (board ? Object.values(board).flat() : []),
     [board]
   );
+
+  useEffect(() => {
+    if (!selectedTask) return;
+    const refreshed = allTasks.find((task) => task.id === selectedTask.id);
+    if (refreshed && refreshed !== selectedTask) setSelectedTask(refreshed);
+  }, [allTasks, selectedTask?.id]);
 
   if (isLoading) return <LoadingScreen label="Loading the board" />;
   if (error) return <ErrorState message={error.message} onRetry={() => refetch()} />;

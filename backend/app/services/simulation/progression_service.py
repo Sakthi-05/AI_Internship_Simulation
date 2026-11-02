@@ -36,6 +36,19 @@ async def progress_to_next_task(
     Progress to the next task after current task is completed.
     Returns the next task if found, None if simulation is complete.
     """
+    # Serialize progression for this simulation. Review callbacks and task
+    # completion requests can arrive close together; both must observe the
+    # same persisted current task before deciding whether to generate work.
+    locked_simulation = db.execute(
+        select(Simulation)
+        .where(Simulation.id == simulation.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if locked_simulation is None:
+        return None
+    simulation = locked_simulation
+
     # Check if task paths are in use for this simulation
     completed_path_entry = db.execute(
         select(SimulationTaskPath)
@@ -164,6 +177,11 @@ async def progress_to_next_task(
         return await _complete_simulation(db, simulation, user_id)
 
     # Fallback to original ScenarioTask-based progression
+    # The legacy path follows the same one-current-task invariant as the
+    # personalized path. A delayed retry for an older completed task must not
+    # move the simulation past its current task.
+    if simulation.current_task_id and simulation.current_task_id != completed_task.id:
+        return None
     if not simulation.current_scenario_id:
         return None
     
@@ -204,8 +222,10 @@ async def progress_to_next_task(
             # Assign next task (set to TODO)
             if next_task.status == TaskStatus.BACKLOG:
                 next_task.status = TaskStatus.TODO
+            _activate_sprint(db, next_task.sprint_id)
             
             simulation.current_task_id = next_task.id
+            _sync_current_scenario(db, simulation, next_task)
             simulation.progress = _calculate_simulation_progress(db, simulation)
             
             db.add(next_task)
@@ -348,6 +368,7 @@ async def _progress_to_next_scenario(
                 # Assign first task of next scenario
                 if first_task.status == TaskStatus.BACKLOG:
                     first_task.status = TaskStatus.TODO
+                _activate_sprint(db, first_task.sprint_id)
                 
                 simulation.current_task_id = first_task.id
                 simulation.progress = _calculate_simulation_progress(db, simulation)

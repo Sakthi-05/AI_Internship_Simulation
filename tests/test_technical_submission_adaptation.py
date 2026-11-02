@@ -8,6 +8,16 @@ from app.models.user import User
 from app.services.ai.ai_service import AIService, get_ai_service
 
 
+def _criteria_from_prompt(prompt):
+    marker = "ACCEPTANCE CRITERIA:\n"
+    if marker not in prompt:
+        return []
+    section = prompt.split(marker, 1)[1]
+    for boundary in ("\nSUBMITTED FILES:", "\nPREVIOUS REVIEW:", "\nSTUDENT-PROVIDED", "\nSUBMISSION:"):
+        section = section.split(boundary, 1)[0]
+    return [line[2:].strip() for line in section.splitlines() if line.startswith("- ")]
+
+
 class _EvidenceReviewer(AIService):
     async def generate_text(self, prompt, system_prompt=None):
         return "rule-based test evaluator"
@@ -22,7 +32,10 @@ class _EvidenceReviewer(AIService):
             "strengths": ["Submission evidence was evaluated by the test reviewer."],
             "issues": [],
             "required_changes": [],
-            "acceptance_criteria": [],
+            "acceptance_criteria": [
+                {"criterion": item, "met": True, "evidence": "The submitted implementation demonstrates this requirement."}
+                for item in _criteria_from_prompt(prompt)
+            ],
             "code_quality": {"score": score, "feedback": "Deterministic integration rubric."},
             "testing": {"score": score, "feedback": "Deterministic integration rubric."},
             "security": {"score": score, "feedback": "Deterministic integration rubric."},
@@ -97,12 +110,13 @@ def test_fresh_student_technical_reviews_change_difficulty_and_next_task(client)
             )
             assert manager.status_code == 201, manager.text
 
-        assert [entry[1] for entry in observed] == [39.33, 39.33, 95.33, 95.33, 95.33, 95.33, 95.33], observed
+        assert [entry[1] for entry in observed] == [54.5, 54.5, 96.5, 96.5, 96.5, 96.5, 96.5], observed
         assert (observed[0][2], observed[0][3]) == ("intermediate", "beginner"), observed
         assert (observed[1][2], observed[1][3]) == ("beginner", "beginner"), observed
-        assert (observed[4][2], observed[4][3]) == ("beginner", "intermediate"), observed
-        assert (observed[5][2], observed[5][3]) == ("intermediate", "advanced"), observed
-        assert (observed[6][2], observed[6][3]) == ("advanced", "advanced"), observed
+        assert (observed[2][2], observed[2][3]) == ("beginner", "beginner"), observed
+        assert (observed[3][2], observed[3][3]) == ("beginner", "intermediate"), observed
+        assert (observed[4][2], observed[4][3]) == ("intermediate", "advanced"), observed
+        assert (observed[5][2], observed[5][3]) == ("advanced", "advanced"), observed
         next_task = client.get(f"/api/simulations/{simulation_id}/tasks/current", headers=headers)
         assert next_task.status_code == 200, next_task.text
         assert next_task.json()["difficulty"] == "advanced", next_task.json()

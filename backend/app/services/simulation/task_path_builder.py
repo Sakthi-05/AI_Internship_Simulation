@@ -63,6 +63,12 @@ def build_task_path(
     Returns:
         List of created SimulationTaskPath entries, ordered by sequence.
     """
+    # A start request may be retried after the path was committed but before
+    # the caller received its response. Treat the persisted path as canonical.
+    existing = get_task_path(db, simulation_id)
+    if existing:
+        return existing
+
     if task_ids is not None:
         tasks = _build_explicit_path(db, project_id, task_ids)
     else:
@@ -88,7 +94,11 @@ def _build_explicit_path(
 ) -> List[Task]:
     """Return the explicitly requested tasks, validated and sorted."""
     tasks = []
+    seen = set()
     for tid in task_ids:
+        if tid in seen:
+            continue
+        seen.add(tid)
         task = db.get(Task, tid)
         if task and task.sprint_id:
             sprint = db.get(Sprint, task.sprint_id)

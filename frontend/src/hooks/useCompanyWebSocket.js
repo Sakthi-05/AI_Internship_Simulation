@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../context/AuthContext";
+import { invalidateWorkspaceQueries, shouldRefreshWorkspaceForPush } from "../lib/workspaceSync";
 
 const WS_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/^http/, "ws");
 
@@ -20,6 +21,7 @@ export function useCompanyWebSocket(companyId) {
     let socket;
     let closedByUs = false;
     let retryTimeout;
+    let refreshTimeout;
 
     const connect = () => {
       socket = new WebSocket(`${WS_BASE}/ws/companies/${companyId}?token=${auth.token}`);
@@ -37,17 +39,14 @@ export function useCompanyWebSocket(companyId) {
       socket.onmessage = (event) => {
         try {
           const { type } = JSON.parse(event.data);
-          if (type === "task_updated" || type === "bug_reported") {
-            queryClient.invalidateQueries({ queryKey: ["board"] });
-            queryClient.invalidateQueries({ queryKey: ["projectState"] });
-            queryClient.invalidateQueries({ queryKey: ["events"] });
-            queryClient.invalidateQueries({ queryKey: ["timeline"] });
-          } else if (type === "chat_message") {
-            queryClient.invalidateQueries({ queryKey: ["chat"] });
-          } else if (type === "event" || type === "notification") {
-            queryClient.invalidateQueries({ queryKey: ["notifications"] });
-            queryClient.invalidateQueries({ queryKey: ["events"] });
-            queryClient.invalidateQueries({ queryKey: ["timeline"] });
+          if (shouldRefreshWorkspaceForPush(type)) {
+            // Some server events are broadcast inside the transaction that
+            // writes them. Coalesce pushes briefly so REST reads see committed
+            // state, and collapse duplicate broadcasts into one refresh.
+            clearTimeout(refreshTimeout);
+            refreshTimeout = setTimeout(() => {
+              invalidateWorkspaceQueries(queryClient);
+            }, 150);
           }
         } catch {
           // ignore malformed frames
@@ -73,6 +72,7 @@ export function useCompanyWebSocket(companyId) {
     return () => {
       closedByUs = true;
       clearTimeout(retryTimeout);
+      clearTimeout(refreshTimeout);
       socket?.close();
     };
   }, [companyId, auth?.token, queryClient]);

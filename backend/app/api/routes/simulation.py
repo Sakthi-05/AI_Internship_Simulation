@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
 from app.models.company import Company
-from app.models.enums import SimulationStatus, ScenarioStatus, TaskStatus, SubmissionStatus, WorkflowEventStatus, WorkflowEventType
+from app.models.enums import MessageSenderType, SimulationStatus, ScenarioStatus, TaskStatus, SubmissionStatus, WorkflowEventStatus, WorkflowEventType
+from app.models.message import Message
 from app.models.project import Project
 from app.models.sprint import Sprint
 from app.models.simulation import Simulation, Scenario, ScenarioTask, WorkflowEvent
@@ -29,6 +30,7 @@ from app.services.engines.simulation_task_state_machine import (
 from app.services.submission.submission_service import SubmissionService
 from app.services.file_storage import FileValidationError
 from app.services.activity_log_service import log_activity
+from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.criteria_version_service import criteria_identity, criteria_view
 from app.services.simulation.interaction_history_service import (
     list_interactions,
@@ -247,6 +249,8 @@ def get_simulation(
         "duration_weeks": simulation.duration_weeks,
         "status": simulation.status.value,
         "progress": simulation.progress,
+        "current_task_id": str(simulation.current_task_id) if simulation.current_task_id else None,
+        "current_sprint_number": current_task.sprint.sprint_number if current_task and current_task.sprint else None,
         "started_at": simulation.started_at.isoformat() if simulation.started_at else None,
         "completed_at": simulation.completed_at.isoformat() if simulation.completed_at else None,
         "created_at": simulation.created_at.isoformat(),
@@ -503,6 +507,7 @@ def get_simulation_progress(
             })
     
     overall_progress = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+    current_task = db.get(Task, simulation.current_task_id) if simulation.current_task_id else None
     
     return {
         "simulation_id": str(simulation.id),
@@ -513,6 +518,7 @@ def get_simulation_progress(
         "remaining_tasks": total_tasks - completed_tasks,
         "current_scenario_id": str(simulation.current_scenario_id) if simulation.current_scenario_id else None,
         "current_task_id": str(simulation.current_task_id) if simulation.current_task_id else None,
+        "current_sprint_number": current_task.sprint.sprint_number if current_task and current_task.sprint else None,
         "started_at": simulation.started_at.isoformat() if simulation.started_at else None,
         "completed_at": simulation.completed_at.isoformat() if simulation.completed_at else None,
         "scenarios": scenario_progress,
@@ -1322,6 +1328,10 @@ async def submit_simulation_task(
     db.flush()
     
     # Collect workflow events encountered during this task
+    from app.services.workplace_scenarios import assess_requirement_changes_for_submission
+    requirement_change_assessments = assess_requirement_changes_for_submission(
+        db, simulation, task, user.student_id
+    )
     from app.services.engines import get_task_workflow_events
     workflow_events = await get_task_workflow_events(db, simulation_id, task_id)
     
@@ -1429,15 +1439,6 @@ async def submit_simulation_task(
                 },
             )
     
-    from app.services.workplace_scenarios import record_task_submission_action
-    record_task_submission_action(
-        db,
-        simulation,
-        task,
-        user.student_id,
-        student_response or "",
-    )
-
     db.commit()
     db.refresh(task)
     db.refresh(simulation)
@@ -1503,6 +1504,7 @@ async def submit_simulation_task(
         "time_taken_minutes": time_taken_minutes,
         "on_time": on_time,
         "deadline_missed": deadline_missed,
+        "requirement_change_assessments": requirement_change_assessments,
         "progress": simulation.progress,
         "current_scenario": {
             "id": str(current_scenario.id),
@@ -1567,6 +1569,11 @@ async def record_simulation_event_action(
     """Record work the student did after replying to a requirement change."""
     simulation = _get_owned_simulation(simulation_id, db, user)
     task, event = _owned_workflow_event(db, simulation, task_id, event_id)
+    if payload.action != "adapted_work":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Submit an explicit adapted_work action for a requirement change.",
+        )
     from app.services.workplace_scenarios import WorkplaceScenarioError, record_subsequent_action
     try:
         result = record_subsequent_action(
@@ -1586,6 +1593,7 @@ async def respond_to_simulation_event(
     response: str = Form(...),
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
+    ai_service: AIService = Depends(get_ai_service),
 ):
     """Respond to a workflow event (requirement change, deadline warning, etc.)."""
     simulation = _get_owned_simulation(simulation_id, db, user)
@@ -1607,6 +1615,52 @@ async def respond_to_simulation_event(
             result = record_requirement_reply(db, simulation, task, event, user.student_id, response)
         except WorkplaceScenarioError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        # Requirement-change replies share the persisted manager chat stream.
+        # Keep the response id on the event so retries/reconnects never create
+        # a second manager response for the same event.
+        metadata = dict(event.metadata_json or {})
+        manager_response_id = metadata.get("manager_response_message_id")
+        manager_response = db.get(Message, uuid.UUID(manager_response_id)) if manager_response_id else None
+        if manager_response is None:
+            from app.models.manager import Manager
+            from app.models.project import Project
+            from app.models.project_state import ProjectState
+            from app.services.manager_communication_service import create_manager_response
+
+            manager = db.execute(select(Manager).where(Manager.company_id == simulation.company_id)).scalar_one()
+            project = db.get(Project, simulation.project_id)
+            state = db.execute(select(ProjectState).where(ProjectState.project_id == project.id)).scalar_one_or_none()
+            history = db.execute(
+                select(Message).where(
+                    Message.company_id == simulation.company_id,
+                    Message.sender_type.in_([MessageSenderType.STUDENT, MessageSenderType.MANAGER]),
+                ).order_by(Message.created_at, Message.id)
+            ).scalars().all()
+            version_number = metadata.get("criteria_version_number", "unknown")
+            context = (
+                f"Task: {task.title}. Requirement change event: {event.id}. "
+                f"Criteria version: {version_number}. Original requirement: {event.original_requirement}. "
+                f"Updated requirement: {event.updated_requirement}. Student response: {response}"
+            )
+            manager_response = await create_manager_response(
+                db, ai_service, manager, project, state, history, response, context
+            )
+            metadata["manager_response_message_id"] = str(manager_response.id)
+            metadata["manager_response_criteria_version_number"] = version_number
+            event.metadata_json = metadata
+            db.add(event)
+            db.flush()
+            result["manager_response"] = {
+                "id": str(manager_response.id), "sender_type": "manager",
+                "sender_id": str(manager.id), "content": manager_response.content,
+                "created_at": manager_response.created_at.isoformat() if manager_response.created_at else None,
+            }
+        else:
+            result["manager_response"] = {
+                "id": str(manager_response.id), "sender_type": "manager",
+                "sender_id": manager_response.sender_id, "content": manager_response.content,
+                "created_at": manager_response.created_at.isoformat() if manager_response.created_at else None,
+            }
         record_interaction(
             db,
             simulation,
@@ -1619,6 +1673,16 @@ async def respond_to_simulation_event(
             metadata={"event_id": str(event.id), "event_type": "requirement_change"},
         )
         db.commit()
+        from app.websockets.manager import manager as ws_manager
+        student_message_id = metadata.get("student_message_id")
+        for message in (db.get(Message, uuid.UUID(student_message_id)) if student_message_id else None, manager_response):
+            if message is not None:
+                await ws_manager.broadcast(str(simulation.company_id), "chat_message", {
+                    "channel": "manager", "id": str(message.id),
+                    "sender_type": message.sender_type.value, "sender_id": message.sender_id,
+                    "content": message.content, "created_at": message.created_at.isoformat(),
+                })
+        await ws_manager.broadcast(str(simulation.company_id), "event", {"event_id": str(event.id)})
         return result
     
     # Record response

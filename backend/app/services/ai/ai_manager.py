@@ -27,7 +27,9 @@ _PERSONALITY_VOICE = {
 }
 
 
-def _state_summary(state: ProjectState) -> str:
+def _state_summary(state: ProjectState | None) -> str:
+    if state is None:
+        return "No project state metrics are available."
     return (
         f"completed_tasks={state.completed_tasks}, pending_tasks={state.pending_tasks}, "
         f"missed_deadlines={state.missed_deadlines}, bug_count={state.bug_count}, "
@@ -50,9 +52,10 @@ async def generate_manager_reply(
     ai_service: AIService,
     manager: Manager,
     project: Project,
-    state: ProjectState,
+    state: ProjectState | None,
     history: List[Message],
     student_message: str,
+    workplace_context: str | None = None,
 ) -> str:
     voice = _PERSONALITY_VOICE.get(manager.personality.value, _PERSONALITY_VOICE["corporate"])
 
@@ -66,6 +69,7 @@ async def generate_manager_reply(
 
     prompt = (
         f"Project state: {_state_summary(state)}\n\n"
+        f"Current workplace context: {workplace_context or 'No task-specific context supplied.'}\n\n"
         f"Recent conversation:\n{_history_block(history)}\n\n"
         f"Student just said: \"{student_message}\"\n\n"
         "Write your reply as the manager."

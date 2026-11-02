@@ -7,6 +7,7 @@ a new assessment path. Nothing here calls an AI provider or a timer.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
@@ -16,10 +17,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.models.enums import MessageSenderType, TaskStatus, WorkflowEventStatus, WorkflowEventType
+from app.models.enums import MessageSenderType, SubmissionStatus, TaskStatus, WorkflowEventStatus, WorkflowEventType
 from app.models.manager import Manager
 from app.models.message import Message
 from app.models.simulation import Scenario, Simulation, WorkflowEvent
+from app.models.submission import Submission, SubmissionVersion
 from app.models.soft_skill import SoftSkillEvidence
 from app.models.task import Task
 
@@ -172,7 +174,7 @@ def _parse_time(value: Optional[str]) -> Optional[datetime]:
 
 
 def find_requirement_change(db: Session, simulation: Simulation, task: Task) -> Optional[WorkflowEvent]:
-    """Return the open requirement change, or the earliest one when none is open."""
+    """Return the open requirement change, or the most recent historical one."""
     return _open_requirement_change(db, simulation, task) or _existing_requirement_change(db, simulation, task)
 
 
@@ -200,7 +202,7 @@ def _existing_requirement_change(db: Session, simulation: Simulation, task: Task
             WorkflowEvent.task_id == task.id,
             WorkflowEvent.event_type == WorkflowEventType.REQUIREMENT_CHANGE,
         )
-        .order_by(WorkflowEvent.occurred_at)
+        .order_by(WorkflowEvent.occurred_at.desc(), WorkflowEvent.created_at.desc())
     ).scalars().first()
 
 
@@ -433,10 +435,14 @@ def record_subsequent_action(
     if any(item.get("action") == kind for item in actions):
         raise WorkplaceScenarioError("That action is already recorded for this requirement change.", 409)
     actions.append({
+        "action_id": str(uuid.uuid4()),
         "action": kind,
         "detail": note,
         "at": datetime.now(timezone.utc).isoformat(),
         "student_id": student_id,
+        "event_id": str(event.id),
+        "criteria_version_id": metadata.get("criteria_version_id"),
+        "criteria_version_number": metadata.get("criteria_version_number"),
     })
     metadata["actions"] = actions
     _save_metadata(event, metadata)
@@ -504,51 +510,274 @@ def assess_requirement_change(
     criterion = metadata.get("added_criterion") or event.updated_requirement or ""
     reply = (event.response or "").strip()
     replied_at = _aware(event.responded_at)
+    recorded_reply = _recorded_requirement_reply(db, simulation, event, student_id)
     later_actions = []
+    seen_actions = set()
     for item in metadata.get("actions") or []:
         acted_at = _parse_time(item.get("at"))
-        if replied_at is not None and acted_at is not None and acted_at >= replied_at:
+        action_key = item.get("action_id") or (item.get("action"), item.get("at"), item.get("detail"))
+        if action_key in seen_actions:
+            continue
+        seen_actions.add(action_key)
+        if (
+            item.get("action") == "adapted_work"
+            and item.get("event_id") in (None, str(event.id))
+            and item.get("criteria_version_id") in (None, metadata.get("criteria_version_id"))
+            and item.get("criteria_version_number") in (None, metadata.get("criteria_version_number"))
+            and replied_at is not None
+            and acted_at is not None
+            and acted_at >= replied_at
+        ):
             later_actions.append(item)
 
-    communication = _communication_observation(reply, criterion)
-    adaptability = _adaptability_observation(later_actions, criterion)
+    task_evidence = _supporting_submission(db, task, student_id, event, later_actions)
+    communication = _communication_observation(reply, criterion, recorded=recorded_reply is not None)
+    adaptability = _adaptability_observation(later_actions, criterion, task_evidence)
     rows = {
         "communication": _upsert_evidence(
-            db, simulation, task, event, student_id, "communication", communication, reply, later_actions
+            db, simulation, task, event, student_id, "communication", communication, reply, later_actions,
+            supporting_evidence={
+                "message_id": str(recorded_reply.id),
+                "rubric": communication.get("rubric", {}),
+            } if recorded_reply else {},
+            preserve_existing=True,
         ),
         "adaptability": _upsert_evidence(
-            db, simulation, task, event, student_id, "adaptability", adaptability, reply, later_actions
+            db, simulation, task, event, student_id, "adaptability", adaptability, reply, later_actions,
+            supporting_evidence={
+                "action_id": task_evidence["action_id"],
+                "submission_id": task_evidence["submission_id"],
+                "submission_version_id": task_evidence["submission_version_id"],
+                "criteria_version_id": task_evidence["criteria_version_id"],
+                "criteria_version_number": task_evidence["criteria_version_number"],
+            } if task_evidence else {},
         ),
     }
     db.flush()
     return _assessment_payload(rows)
 
 
-def _communication_observation(reply: str, criterion: str) -> Dict[str, Any]:
-    if len(reply.split()) >= 8 and _references_change(reply, criterion):
-        stated_plan = bool(_tokens(reply) & _PLAN_TOKENS)
+def _recorded_requirement_reply(
+    db: Session, simulation: Simulation, event: WorkflowEvent, student_id: str
+) -> Optional[Message]:
+    message_id = _event_metadata(event).get("student_message_id")
+    if not message_id:
+        return None
+    try:
+        message_uuid = uuid.UUID(str(message_id))
+    except (ValueError, TypeError):
+        return None
+    message = db.get(Message, message_uuid)
+    if (
+        message is None
+        or message.company_id != simulation.company_id
+        or message.sender_type != MessageSenderType.STUDENT
+        or message.sender_id != student_id
+        or message.content.strip() != (event.response or "").strip()
+    ):
+        return None
+    return message
+
+
+def _supporting_submission(
+    db: Session,
+    task: Task,
+    student_id: str,
+    event: WorkflowEvent,
+    actions: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Find a real submitted artifact for this exact criteria version, after the adaptation."""
+    if not actions:
+        return None
+    metadata = _event_metadata(event)
+    criteria_id = metadata.get("criteria_version_id")
+    criteria_number = metadata.get("criteria_version_number")
+    action_times = [_parse_time(item.get("at")) for item in actions]
+    action_times = [value for value in action_times if value is not None]
+    if not action_times or not criteria_id:
+        return None
+    versions = db.execute(
+        select(SubmissionVersion, Submission)
+        .join(Submission, Submission.id == SubmissionVersion.submission_id)
+        .where(
+            Submission.task_id == task.id,
+            Submission.student_id == student_id,
+            SubmissionVersion.status == SubmissionStatus.SUBMITTED,
+            SubmissionVersion.submitted_at.is_not(None),
+        )
+        .order_by(SubmissionVersion.submitted_at.desc(), SubmissionVersion.version_number.desc())
+    ).all()
+    for version, submission in versions:
+        submitted_at = _aware(version.submitted_at)
+        if submitted_at is None or submitted_at < max(action_times):
+            continue
+        version_identity = (version.version_metadata or {}).get("acceptance_criteria_version") or {}
+        if (
+            version_identity.get("id") != criteria_id
+            or version_identity.get("version_number") != criteria_number
+        ):
+            continue
+        submitted_code = (version.version_metadata or {}).get("code")
+        metadata_has_artifact = (
+            isinstance(submitted_code, str)
+            and len(submitted_code.strip()) >= 20
+            and any(marker in submitted_code.lower() for marker in (
+                "def ", "class ", "function ", "return ", "const ", "=>", "{", "</"
+            ))
+        )
+        if not version.files and not metadata_has_artifact:
+            continue
+        return {
+            "action_id": actions[-1].get("action_id"),
+            "submission_id": str(submission.id),
+            "submission_version_id": str(version.id),
+            "criteria_version_id": criteria_id,
+            "criteria_version_number": criteria_number,
+            "submitted_at": submitted_at.isoformat(),
+        }
+    return None
+
+
+def assess_requirement_changes_for_submission(
+    db: Session, simulation: Simulation, task: Task, student_id: str
+) -> List[Dict[str, Any]]:
+    """Reassess only events with explicit adaptation actions after a new task artifact is stored."""
+    events = db.execute(
+        select(WorkflowEvent).where(
+            WorkflowEvent.simulation_id == simulation.id,
+            WorkflowEvent.task_id == task.id,
+            WorkflowEvent.event_type == WorkflowEventType.REQUIREMENT_CHANGE,
+            WorkflowEvent.response.is_not(None),
+        ).order_by(WorkflowEvent.occurred_at, WorkflowEvent.id)
+    ).scalars().all()
+    updated = []
+    for event in events:
+        if not any(item.get("action") == "adapted_work" for item in (_event_metadata(event).get("actions") or [])):
+            continue
+        assessment = assess_requirement_change(db, simulation, task, event, student_id)
+        _resolve_when_adaptation_scored(db, event, assessment)
+        updated.append(serialize_workflow_event(db, event, task))
+    return updated
+
+
+def _communication_observation(reply: str, criterion: str, *, recorded: bool) -> Dict[str, Any]:
+    if not recorded:
+        return {
+            "status": INSUFFICIENT,
+            "score": None,
+            "summary": "No verifiable student reply is linked to this requirement change.",
+            "reason": "missing_recorded_reply",
+        }
+    words = _tokens(reply)
+    if len(words) < 5 or words <= {"ok", "okay", "sure", "yes", "understood", "noted", "thanks", "got", "it"}:
+        return {
+            "status": INSUFFICIENT,
+            "score": None,
+            "summary": "The recorded reply is too brief to assess communication about the requirement.",
+            "reason": "reply_too_superficial",
+            "rubric": {"relevance": False, "clarity": False, "completeness": False, "responsiveness": False},
+        }
+
+    stopwords = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "i", "in", "is", "it",
+        "of", "on", "or", "that", "the", "this", "to", "we", "will", "with", "you", "your",
+        "new", "change", "changed", "requirement", "criteria", "criterion", "task", "work", "updated",
+    }
+    semantic_groups = {
+        "validation": {"validate", "validation", "valid", "check", "sanitize", "reject", "guard"},
+        "input": {"input", "payload", "request", "parameter", "parameters", "value", "data"},
+        "error": {"error", "invalid", "failure", "exception", "malformed", "malform", "bad"},
+        "response": {"response", "message", "return", "returning", "show", "display"},
+    }
+    aliases = {word: label for label, values in semantic_groups.items() for word in values}
+
+    def normalize(token: str) -> str:
+        for suffix in ("ing", "ed", "s"):
+            if len(token) > len(suffix) + 3 and token.endswith(suffix):
+                return token[:-len(suffix)]
+        return token
+
+    response_terms = {aliases.get(normalize(token), normalize(token)) for token in words if token not in stopwords}
+    criterion_terms = {
+        aliases.get(normalize(token), normalize(token))
+        for token in _tokens(criterion) if token not in stopwords and len(token) > 2
+    }
+    overlap = response_terms & criterion_terms
+    overlap_required = min(2, len(criterion_terms))
+    relevant = bool(criterion_terms) and len(overlap) >= max(1, overlap_required)
+
+    lower = reply.lower()
+    has_plan_subject = bool(re.search(r"\b(i|we)\b", lower))
+    has_action = bool(re.search(
+        r"\b(update|add|implement|revise|validate|return|build|write|document|include|cover|check|test|verify|confirm|ensure|investigate|fix|deliver)\w*\b",
+        lower,
+    ))
+    has_verification = bool(re.search(
+        r"\b(test|verify|check|confirm|ensure|validate|failure|invalid|error|result|review|coverage|pass|fail)\w*\b",
+        lower,
+    ))
+    has_sequence = bool(re.search(r"\b(and|then|before|after|so that)\b", lower))
+    clarity = has_plan_subject and has_action and len(response_terms) >= 4
+    completeness = clarity and relevant and has_verification and has_sequence
+    responsiveness = relevant and has_plan_subject and has_action
+    rubric = {
+        "relevance": relevant,
+        "clarity": clarity,
+        "completeness": completeness,
+        "responsiveness": responsiveness,
+        "criterion_terms_matched": sorted(overlap),
+    }
+
+    if not relevant:
         return {
             "status": SCORED,
-            "score": 82.0 if stated_plan else 68.0,
-            "summary": "The reply addresses the changed requirement.",
-            "reason": "message_references_change",
+            "score": 35.0,
+            "summary": "The recorded reply does not address the changed requirement.",
+            "reason": "recorded_reply_unrelated_to_change",
+            "rubric": rubric,
+        }
+    if completeness and responsiveness and len(words) >= 12:
+        return {
+            "status": SCORED,
+            "score": 82.0,
+            "summary": "The reply is relevant, clear, responsive, and includes a concrete verification step.",
+            "reason": "complete_relevant_workplace_reply",
+            "rubric": rubric,
+        }
+    if responsiveness and clarity:
+        return {
+            "status": SCORED,
+            "score": 62.0,
+            "summary": "The reply addresses the requirement and states an action, but leaves the plan incomplete.",
+            "reason": "relevant_but_incomplete_workplace_reply",
+            "rubric": rubric,
         }
     return {
-        "status": INSUFFICIENT,
-        "score": None,
-        "summary": "The reply does not yet show how the student communicated about the change.",
-        "reason": "message_missing_or_unrelated",
+        "status": SCORED,
+        "score": 45.0,
+        "summary": "The reply mentions the changed requirement but is too vague to show a clear response plan.",
+        "reason": "relevant_but_vague_workplace_reply",
+        "rubric": rubric,
     }
 
 
-def _adaptability_observation(actions: Sequence[Dict[str, Any]], criterion: str) -> Dict[str, Any]:
+def _adaptability_observation(
+    actions: Sequence[Dict[str, Any]], criterion: str, task_evidence: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
     authored = [item for item in actions if item.get("action") == "adapted_work" and _references_change(item.get("detail") or "", criterion)]
-    if authored:
+    if authored and task_evidence:
         return {
             "status": SCORED,
             "score": 84.0,
             "summary": "A later action describes work changed for the new requirement.",
             "reason": "subsequent_action_references_change",
+        }
+    if actions and task_evidence:
+        return {
+            "status": SCORED,
+            "score": 35.0,
+            "summary": "A task artifact was submitted for the changed criteria, but the recorded action does not explain the adaptation.",
+            "reason": "submitted_artifact_without_relevant_adaptation",
         }
     submitted = [item for item in actions if item.get("action") == "task_submitted" and _references_change(item.get("detail") or "", criterion)]
     if submitted:
@@ -576,6 +805,8 @@ def _upsert_evidence(
     observation: Dict[str, Any],
     reply: str,
     actions: Sequence[Dict[str, Any]],
+    supporting_evidence: Optional[Dict[str, Any]] = None,
+    preserve_existing: bool = False,
 ) -> SoftSkillEvidence:
     row = db.execute(
         select(SoftSkillEvidence).where(
@@ -583,6 +814,10 @@ def _upsert_evidence(
             SoftSkillEvidence.competency == competency,
         )
     ).scalar_one_or_none()
+    # Communication is assessed when its immutable event reply is first saved.
+    # Later adaptation/submission assessments must not rewrite historical scores.
+    if row is not None and preserve_existing:
+        return row
     if row is None:
         row = SoftSkillEvidence(
             student_id=student_id,
@@ -604,6 +839,10 @@ def _upsert_evidence(
         "reply": reply,
         "subsequent_actions": [dict(item) for item in actions],
         "added_criterion": (_event_metadata(event).get("added_criterion") or event.updated_requirement),
+        "requirement_change_event_id": str(event.id),
+        "criteria_version_id": _event_metadata(event).get("criteria_version_id"),
+        "criteria_version_number": _event_metadata(event).get("criteria_version_number"),
+        "supporting_evidence": supporting_evidence or {},
     }
     flag_modified(row, "evidence")
     db.add(row)
@@ -700,7 +939,8 @@ def workplace_phase(event: Dict[str, Any]) -> str:
     described = any(item.get("action") == "adapted_work" for item in (event.get("subsequent_actions") or []))
     if not described:
         return "adapt"
-    return "assessed"
+    adaptability = ((event.get("assessment") or {}).get("adaptability") or {})
+    return "assessed" if adaptability.get("status") == SCORED else "verify"
 
 
 def _require_requirement_event(event: WorkflowEvent, simulation: Simulation, task: Task) -> None:
