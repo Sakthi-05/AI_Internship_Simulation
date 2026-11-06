@@ -150,8 +150,22 @@ def baseline_evaluator(monkeypatch):
 
 
 @pytest.fixture
-def mock_student():
+def mock_student(db):
     student_id = f"student_{uuid.uuid4().hex[:8]}"
+    # Baseline generation now requires an explicit domain-specific familiarity
+    # profile. Keep shared assessment fixtures valid without using generic
+    # StudentSkill ratings as a substitute.
+    from app.services.technical_domain_catalog import get_technical_domain
+    from app.services.technical_profile_service import save_technical_domain_ratings
+
+    domain = get_technical_domain("software_development")
+    save_technical_domain_ratings(
+        db,
+        student_id,
+        domain.id,
+        [{"technology_id": item.id, "self_rating": 3} for item in domain.technologies],
+    )
+    db.commit()
     token = make_token(student_id)
     return {
         "student_id": student_id,

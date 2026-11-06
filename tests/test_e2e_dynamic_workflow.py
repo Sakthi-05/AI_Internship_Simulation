@@ -48,6 +48,17 @@ class _OfflineTaskAI(AIService):
 def fresh_student(db: Session):
     """Create a fresh student for testing."""
     student_id = f"test_student_{uuid_module.uuid4().hex[:12]}"
+    from app.services.technical_domain_catalog import get_technical_domain
+    from app.services.technical_profile_service import save_technical_domain_ratings
+
+    domain = get_technical_domain("software_development")
+    save_technical_domain_ratings(
+        db,
+        student_id,
+        domain.id,
+        [{"technology_id": item.id, "self_rating": 3} for item in domain.technologies],
+    )
+    db.commit()
     return student_id
 
 

@@ -7,13 +7,22 @@ import { useGenerateSimulation } from "../hooks/useApi";
 import { pickResumableSimulation, toSimulationContext, useSimulationList } from "../hooks/useSimulationApi";
 import LoadingScreen from "../components/LoadingScreen";
 import AmbientBackground from "../components/AmbientBackground";
+import AssessmentHistory from "../components/AssessmentHistory";
 import { apiClient } from "../api/client";
+import {
+  buildTechnicalProfilePayload,
+  getDomainTechnologies,
+  loadTechnicalProfile,
+  ratingsFromTechnicalProfile,
+  saveTechnicalProfile as saveTechnicalProfileRequest,
+  technicalProfileState,
+} from "../lib/technicalProfile";
 
-const STEP_ORDER = ["auth", "profile", "skills", "assessment", "ready"];
+const STEP_ORDER = ["auth", "profile", "technical-profile", "assessment", "ready"];
 const STEP_LABELS = {
   auth: "Sign in",
   profile: "Profile",
-  skills: "Skills",
+  "technical-profile": "Technical profile",
   assessment: "Assessment",
   ready: "Launch",
 };
@@ -104,8 +113,14 @@ export default function Onboarding() {
   const [busy, setBusy] = useState(false);
 
   const [profile, setProfile] = useState(null);
-  const [catalog, setCatalog] = useState([]);
-  const [selectedSkills, setSelectedSkills] = useState({});
+  const [technicalDomains, setTechnicalDomains] = useState([]);
+  const [technicalProfile, setTechnicalProfile] = useState(null);
+  const [technicalProfileLoaded, setTechnicalProfileLoaded] = useState(false);
+  const [technicalProfileLoading, setTechnicalProfileLoading] = useState(false);
+  const [technicalProfileError, setTechnicalProfileError] = useState(null);
+  const [technicalEditing, setTechnicalEditing] = useState(false);
+  const [technicalDomainId, setTechnicalDomainId] = useState("");
+  const [technicalRatings, setTechnicalRatings] = useState({});
   const [attempt, setAttempt] = useState(null);
   const [assessmentEvaluation, setAssessmentEvaluation] = useState(null);
   const [answers, setAnswers] = useState({});
@@ -122,10 +137,17 @@ export default function Onboarding() {
   useEffect(() => {
     if (!auth?.token || !auth?.studentId) {
       setProfile(null);
+      setTechnicalProfile(null);
+      setTechnicalDomains([]);
+      setTechnicalProfileLoaded(false);
+      setTechnicalProfileLoading(false);
+      setTechnicalProfileError(null);
+      setTechnicalEditing(false);
+      setTechnicalDomainId("");
+      setTechnicalRatings({});
       setAttempt(null);
       setAssessmentEvaluation(null);
       setAnswers({});
-      setSelectedSkills({});
       setFullName("");
       setCollege("");
       setDegree("");
@@ -138,6 +160,26 @@ export default function Onboarding() {
     }
     if (auth.role === "admin") return;
     let cancelled = false;
+    setTechnicalProfile(null);
+    setTechnicalDomains([]);
+    setTechnicalProfileLoaded(false);
+    setTechnicalProfileLoading(true);
+    setTechnicalProfileError(null);
+    setTechnicalEditing(false);
+    setTechnicalDomainId("");
+    setTechnicalRatings({});
+    loadTechnicalProfile(apiClient).then(({ domains, profile: savedProfile }) => {
+      if (cancelled) return;
+      setTechnicalDomains(domains);
+      setTechnicalProfile(savedProfile);
+      setTechnicalDomainId(savedProfile?.status === "active" ? savedProfile.technical_domain_id : "");
+      setTechnicalRatings(ratingsFromTechnicalProfile(savedProfile));
+      setTechnicalProfileLoaded(true);
+    }).catch((err) => {
+      if (!cancelled) setTechnicalProfileError(err.message || "Could not load your technical profile.");
+    }).finally(() => {
+      if (!cancelled) setTechnicalProfileLoading(false);
+    });
     apiClient.get("/api/students/me").then((res) => {
       if (cancelled) return;
       const data = res.data;
@@ -156,15 +198,7 @@ export default function Onboarding() {
       setCareerGoal(data.career_goal || "");
       setRole(data.role || "Backend Developer");
       setDomain(data.domain || "startup");
-      const ratings = {};
-      (data.skill_ratings || []).forEach((item) => {
-        ratings[item.name] = item.self_rating;
-      });
-      setSelectedSkills(ratings);
     }).catch((err) => setFormError(err.message));
-    apiClient.get("/api/skills").then((res) => {
-      if (!cancelled) setCatalog(res.data.skills || []);
-    }).catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -197,10 +231,17 @@ export default function Onboarding() {
     if (typeof unloadSimulation === "function") unloadSimulation();
     else clearSimulation();
     setProfile(null);
+    setTechnicalProfile(null);
+    setTechnicalDomains([]);
+    setTechnicalProfileLoaded(false);
+    setTechnicalProfileLoading(false);
+    setTechnicalProfileError(null);
+    setTechnicalEditing(false);
+    setTechnicalDomainId("");
+    setTechnicalRatings({});
     setAttempt(null);
     setAssessmentEvaluation(null);
     setAnswers({});
-    setSelectedSkills({});
     setFormError(null);
     setNotice(null);
     setAuthError(null);
@@ -260,24 +301,62 @@ export default function Onboarding() {
     }
   };
 
-  const saveSkills = async (event) => {
+  const refreshTechnicalProfile = async () => {
+    setTechnicalProfileLoading(true);
+    setTechnicalProfileError(null);
+    try {
+      const { domains, profile: savedProfile } = await loadTechnicalProfile(apiClient);
+      setTechnicalDomains(domains);
+      setTechnicalProfile(savedProfile);
+      setTechnicalDomainId(savedProfile?.status === "active" ? savedProfile.technical_domain_id : "");
+      setTechnicalRatings(ratingsFromTechnicalProfile(savedProfile));
+      setTechnicalProfileLoaded(true);
+    } catch (err) {
+      setTechnicalProfileError(err.message || "Could not load your technical profile.");
+    } finally {
+      setTechnicalProfileLoading(false);
+    }
+  };
+
+  const handleTechnicalDomainChange = (nextDomainId) => {
+    setTechnicalDomainId(nextDomainId);
+    const isSavedDomain = technicalProfile?.status === "active"
+      && nextDomainId === technicalProfile.technical_domain_id;
+    setTechnicalRatings(isSavedDomain ? ratingsFromTechnicalProfile(technicalProfile) : {});
+    setTechnicalProfileError(null);
+  };
+
+  const handleSaveTechnicalProfile = async (event) => {
     event.preventDefault();
-    const skills = Object.entries(selectedSkills).map(([name, self_rating]) => ({ name, self_rating }));
-    if (!skills.length) {
-      setFormError("Select at least one skill.");
+    setTechnicalProfileError(null);
+    const technologies = getDomainTechnologies(technicalDomains, technicalDomainId);
+    let payload;
+    try {
+      payload = buildTechnicalProfilePayload(technicalDomainId, technologies, technicalRatings);
+    } catch (err) {
+      setTechnicalProfileError(err.message);
       return;
     }
-    setFormError(null);
     setBusy(true);
     try {
-      await apiClient.put("/api/students/me/skills", { skills });
-      const res = await apiClient.get("/api/students/me");
-      setProfile(res.data);
+      const savedProfile = await saveTechnicalProfileRequest(apiClient, payload);
+      setTechnicalProfile(savedProfile);
+      setTechnicalDomainId(savedProfile.technical_domain_id);
+      setTechnicalRatings(ratingsFromTechnicalProfile(savedProfile));
+      setTechnicalProfileLoaded(true);
+      setTechnicalEditing(false);
     } catch (err) {
-      setFormError(err.message);
+      setTechnicalProfileError(err.message || "Could not save your technical profile.");
     } finally {
       setBusy(false);
     }
+  };
+
+  const editTechnicalProfile = () => {
+    setTechnicalDomainId(technicalProfile.technical_domain_id);
+    setTechnicalRatings(ratingsFromTechnicalProfile(technicalProfile));
+    setTechnicalProfileError(null);
+    setTechnicalEditing(true);
   };
 
   const beginAssessment = async () => {
@@ -428,7 +507,17 @@ export default function Onboarding() {
     return <LoadingScreen />;
   }
 
-  const step = !auth?.token || !auth?.studentId ? "auth" : !profile ? "profile" : !profile.profile_complete ? "profile" : !(profile.skill_ratings || []).length ? "skills" : !profile.assessed ? "assessment" : "ready";
+  const step = !auth?.token || !auth?.studentId ? "auth"
+    : !profile ? "profile"
+      : !profile.profile_complete ? "profile"
+            : !technicalProfileLoaded || technicalProfileState(technicalProfile) !== "active" || technicalEditing ? "technical-profile"
+          : !profile.assessed ? "assessment" : "ready";
+  const currentTechnicalTechnologies = getDomainTechnologies(technicalDomains, technicalDomainId);
+  const technicalRatingsComplete = currentTechnicalTechnologies.length > 0
+    && currentTechnicalTechnologies.every((technology) => {
+      const rating = technicalRatings[technology.id];
+      return Number.isInteger(rating) && rating >= 1 && rating <= 5;
+    });
 
   return (
     <div className="relative min-h-full overflow-y-auto">
@@ -553,64 +642,112 @@ export default function Onboarding() {
           </motion.form>
         )}
 
-        {step === "skills" && (
+        {technicalProfileState(technicalProfile) === "active" && step !== "technical-profile" && (
+          <section className="card mt-4 space-y-3 p-5" aria-label="Saved technical profile">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="eyebrow">Technical familiarity · Self-reported</p>
+                <p className="mt-1 text-sm font-semibold text-text">{technicalProfile.domain?.name || technicalProfile.technical_domain_id}</p>
+                <p className="mt-1 text-xs text-text-muted">These ratings describe your familiarity and are not verified skill scores.</p>
+              </div>
+              <button type="button" className="btn-ghost" onClick={editTechnicalProfile}>Edit</button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(technicalProfile.technology_ratings || []).map((technology) => (
+                <span className="chip" key={technology.technology_id}>
+                  {technology.name}: {technology.self_rating ?? "Not rated"}
+                </span>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {step === "technical-profile" && (
           <motion.form
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            onSubmit={saveSkills}
+            onSubmit={handleSaveTechnicalProfile}
             className="card mt-6 space-y-4 p-6"
           >
             <div>
-              <p className="eyebrow">Skill inventory</p>
-              <p className="mt-1 text-sm text-text-muted">Rate the skills you can already demonstrate. 1 is unfamiliar and 5 is confident.</p>
+              <p className="eyebrow">Technical domain profile</p>
+              <p className="mt-1 text-sm text-text-muted">
+                Select one domain and report your familiarity with each listed technology. These are self-reported ratings, not verified skill scores.
+              </p>
             </div>
-            <div className="grid gap-2">
-              {catalog.map((skill, i) => {
-                const selected = selectedSkills[skill.name] != null;
-                return (
-                  <motion.label
-                    key={skill.id}
-                    initial={{ opacity: 0, x: -8 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: Math.min(i * 0.03, 0.4) }}
-                    className={`flex cursor-pointer items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 transition-all duration-200 ${
-                      selected
-                        ? "border-brand-400/50 bg-brand-500/10 shadow-[0_0_20px_-8px_rgba(124,108,246,0.7)]"
-                        : "border-white/[0.06] bg-white/[0.02] hover:border-brand-400/30 hover:bg-brand-500/[0.05]"
-                    }`}
+            {technicalProfileLoading && (
+              <p className="text-sm text-text-muted" role="status">Loading your technical profile and domain catalog…</p>
+            )}
+            {technicalProfileState(technicalProfile) === "unavailable" && (
+              <p className="rounded-lg border border-status-progress/30 bg-status-progress/10 px-3 py-2 text-xs text-text-muted" role="status">
+                Your previously selected domain “{technicalProfile.technical_domain_id}” is unavailable. Choose a valid domain to continue; no replacement has been selected for you.
+              </p>
+            )}
+            {technicalProfileError && (
+              <div className="rounded-lg border border-status-blocked/30 bg-status-blocked/10 px-3 py-2 text-xs text-status-blocked" role="alert">
+                <p>{technicalProfileError}</p>
+                {!technicalProfileLoaded && <button type="button" className="mt-2 underline" onClick={refreshTechnicalProfile} disabled={technicalProfileLoading}>Retry loading</button>}
+              </div>
+            )}
+            {technicalProfileLoaded && technicalDomains.length === 0 && !technicalProfileError && (
+              <p className="text-sm text-text-muted" role="status">No technical domains are currently available. Try loading again later.</p>
+            )}
+            {technicalProfileLoaded && technicalDomains.length > 0 && (
+              <>
+                <Field label="Technical domain">
+                  <select
+                    className="input"
+                    value={technicalDomainId}
+                    onChange={(event) => handleTechnicalDomainChange(event.target.value)}
+                    required
                   >
-                    <span className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={(e) => {
-                          setSelectedSkills((current) => {
-                            const next = { ...current };
-                            if (e.target.checked) next[skill.name] = 3;
-                            else delete next[skill.name];
-                            return next;
-                          });
-                        }}
-                      />
-                      {skill.name}
-                      <span className="text-[11px] text-text-faint">{skill.category}</span>
-                    </span>
-                    {selected && (
-                      <input
-                        className="input w-16"
-                        type="number"
-                        min="1"
-                        max="5"
-                        value={selectedSkills[skill.name]}
-                        onChange={(e) => setSelectedSkills((current) => ({ ...current, [skill.name]: Number(e.target.value) }))}
-                      />
-                    )}
-                    </motion.label>
-                );
-              })}
-            </div>
-            {formError && <p className="rounded-lg border border-status-blocked/30 bg-status-blocked/10 px-3 py-2 text-xs text-status-blocked">{formError}</p>}
-            <button type="submit" className="btn-primary w-full py-2.5" disabled={busy}>Save skills</button>
+                    <option value="">Choose one domain</option>
+                    {technicalDomains.map((domainItem) => (
+                      <option key={domainItem.id} value={domainItem.id}>{domainItem.name}</option>
+                    ))}
+                  </select>
+                </Field>
+                {currentTechnicalTechnologies.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-text-faint">Rate every technology · 1 to 5</p>
+                    {currentTechnicalTechnologies.map((technology) => (
+                      <div key={technology.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium">{technology.name}</p>
+                          <p className="text-xs text-text-faint">{technology.description}</p>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs text-text-muted">
+                          Familiarity
+                          <select
+                            className="input w-24"
+                            value={technicalRatings[technology.id] ?? ""}
+                            onChange={(event) => setTechnicalRatings((current) => ({
+                              ...current,
+                              [technology.id]: event.target.value ? Number(event.target.value) : "",
+                            }))}
+                            aria-label={`${technology.name} self-reported familiarity from 1 to 5`}
+                            required
+                          >
+                            <option value="">Choose</option>
+                            {[1, 2, 3, 4, 5].map((rating) => <option key={rating} value={rating}>{rating}</option>)}
+                          </select>
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+            {technicalProfileLoaded && technicalDomains.length > 0 && (
+              <div className="flex gap-2">
+                <button type="submit" className="btn-primary flex-1 py-2.5" disabled={busy || !technicalRatingsComplete}>
+                  {busy ? "Saving…" : "Save technical profile"}
+                </button>
+                {technicalEditing && technicalProfileState(technicalProfile) === "active" && (
+                  <button type="button" className="btn-ghost" onClick={() => setTechnicalEditing(false)} disabled={busy}>Cancel</button>
+                )}
+              </div>
+            )}
           </motion.form>
         )}
 
@@ -628,7 +765,7 @@ export default function Onboarding() {
                     🧠
                   </div>
                   <p className="eyebrow">Baseline assessment</p>
-                  <p className="mx-auto mt-2 max-w-md text-sm text-text-muted">The question bank scores technical judgment and workplace decisions. Your answers set the baseline competency profile.</p>
+                  <p className="mx-auto mt-2 max-w-md text-sm text-text-muted">Questions assess the technologies in your selected domain. Your familiarity ratings guide coverage and difficulty; your answers independently establish your baseline competency.</p>
                   {formError && <p className="mx-auto mt-3 max-w-md rounded-lg border border-status-blocked/30 bg-status-blocked/10 px-3 py-2 text-xs text-status-blocked">{formError}</p>}
                   <button type="button" className="btn-primary mt-5 px-8 py-3 text-base" onClick={beginAssessment} disabled={busy}>Start assessment →</button>
                 </div>
@@ -750,6 +887,7 @@ export default function Onboarding() {
               </div>
               <p className="pt-1 text-xs text-text-muted">Reinforcement focus: {(profile.recommended_parameters?.focus_competencies || []).join(", ") || "—"}</p>
             </div>
+            <AssessmentHistory />
             {simsEnabled && simsLoading && (
               <div className="flex items-center gap-2 text-xs text-text-faint">
                 <span className="h-3 w-3 rounded-full border-2 border-brand-400/30 border-t-brand-300 animate-spin" style={{ animationDuration: "0.8s" }} />

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Database
-    DATABASE_URL: str = "postgresql+psycopg://aiwse:aiwse_password@localhost:5432/aiwse_db"
+    DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/ai_internship"
 
     # Auth (validation only — tokens are issued by the parent platform / Module 1)
     JWT_SECRET_KEY: str = "change-me-to-the-shared-signing-secret"

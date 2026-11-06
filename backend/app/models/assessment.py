@@ -65,6 +65,9 @@ class AssessmentAttempt(Base, UUIDPKMixin, TimestampMixin):
     generation_metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB, nullable=True, default=dict, server_default=text("'{}'::jsonb")
     )
+    # Private, immutable per-attempt question and completion snapshot. Student
+    # serializers intentionally never include this column.
+    assessment_snapshot: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

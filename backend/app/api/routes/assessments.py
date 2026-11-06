@@ -2,7 +2,7 @@
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,8 @@ from app.core.security import CurrentUser, get_current_user, require_role
 from app.services.assessment_service import (
     create_question,
     delete_question,
+    assessment_history,
+    historical_result,
     latest_result,
     list_questions_admin,
     start_attempt,
@@ -60,6 +62,25 @@ def submit(attempt_id: uuid.UUID, payload: SubmitAttempt, db: Session = Depends(
 def latest(db: Session = Depends(get_db), user: CurrentUser = Depends(get_current_user)):
     result = latest_result(db, user.student_id)
     return {"result": result}
+
+
+@router.get("/api/assessments/history")
+def history(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    return assessment_history(db, user.student_id, limit=limit, offset=offset)
+
+
+@router.get("/api/assessments/{attempt_id}")
+def result(
+    attempt_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    return historical_result(db, user.student_id, attempt_id)
 
 
 @router.get("/api/admin/questions")

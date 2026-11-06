@@ -93,6 +93,22 @@ def test_profile_skills_assessment_and_recommendation(client, baseline_evaluator
     assert saved.status_code == 200, saved.text
     assert {item["name"] for item in saved.json()["skills"]} == {"Python", "FastAPI"}
 
+    domain_catalog = client.get("/api/technical-domains", headers=headers)
+    assert domain_catalog.status_code == 200
+    software_domain = next(item for item in domain_catalog.json()["domains"] if item["id"] == "software_development")
+    technical_profile = client.put(
+        "/api/students/me/technical-profile",
+        headers=headers,
+        json={
+            "technical_domain_id": software_domain["id"],
+            "technology_ratings": [
+                {"technology_id": item["id"], "self_rating": 3}
+                for item in software_domain["technologies"]
+            ],
+        },
+    )
+    assert technical_profile.status_code == 200, technical_profile.text
+
     unknown = client.put(
         "/api/students/me/skills",
         headers=headers,

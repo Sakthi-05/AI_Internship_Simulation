@@ -16,6 +16,7 @@ class StudentProfile(Base, UUIDPKMixin, TimestampMixin):
     student_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     full_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     domain: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    technical_domain_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     role: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     college: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     degree: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
