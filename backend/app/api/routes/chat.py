@@ -14,6 +14,7 @@ this company sees them live (FEATURE 17).
 """
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -66,6 +67,31 @@ def _project_for(db: Session, company_id: uuid.UUID) -> Project:
     return project
 
 
+def _find_retry_exchange(db: Session, company_id, student_id, payload, reply_type):
+    stmt = select(Message).where(
+        Message.company_id == company_id,
+        Message.sender_type == MessageSenderType.STUDENT,
+        Message.sender_id == student_id,
+    )
+    if payload.idempotency_key:
+        stmt = stmt.where(Message.idempotency_key == payload.idempotency_key)
+    else:
+        stmt = stmt.where(
+            Message.content == payload.content,
+            Message.created_at >= datetime.now(timezone.utc) - timedelta(seconds=3),
+        )
+    existing = db.execute(stmt.order_by(Message.created_at.desc()).limit(1)).scalar_one_or_none()
+    if existing is None:
+        return None
+    reply = db.execute(select(Message).where(
+        Message.in_reply_to_id == existing.id,
+        Message.sender_type == reply_type,
+    ).order_by(Message.created_at.desc()).limit(1)).scalar_one_or_none()
+    if reply is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The previous message is still being processed")
+    return ChatExchange(student_message=existing, reply=reply)
+
+
 @router.get("/manager", response_model=List[MessageRead])
 async def get_manager_chat_history(
     company_id: uuid.UUID,
@@ -94,6 +120,10 @@ async def send_manager_message(
     orchestrator: AgentOrchestrator = Depends(get_agent_orchestrator),
 ):
     company = _get_owned_company(company_id, db, user)
+    db.execute(select(Company.id).where(Company.id == company_id).with_for_update()).first()
+    retry = _find_retry_exchange(db, company_id, user.student_id, payload, MessageSenderType.MANAGER)
+    if retry is not None:
+        return retry
     project = _project_for(db, company_id)
     manager_row = db.execute(select(Manager).where(Manager.company_id == company_id)).scalar_one()
 
@@ -112,22 +142,26 @@ async def send_manager_message(
     student_msg = Message(
         company_id=company_id, sender_type=MessageSenderType.STUDENT,
         sender_id=user.student_id, content=payload.content,
+        idempotency_key=payload.idempotency_key,
     )
     db.add(student_msg)
     db.flush()
     history.append(student_msg)
 
-    workplace_context = "No active simulation task."
-    from app.models.enums import SimulationStatus
+    workplace_context = (
+        f"Project: {project.title}. Role: {project.role}. "
+        f"Technology stack: {', '.join(project.technology_stack or []) or 'not specified'}."
+    )
     from app.models.simulation import Simulation
     from app.models.task import Task
     simulation = db.execute(
         select(Simulation).where(
             Simulation.project_id == project.id,
             Simulation.student_id == user.student_id,
-            Simulation.status == SimulationStatus.IN_PROGRESS,
         ).order_by(Simulation.created_at.desc())
     ).scalars().first()
+    if simulation is not None:
+        student_msg.simulation_id = simulation.id
     if simulation is not None and simulation.current_task_id is not None:
         current_task = db.get(Task, simulation.current_task_id)
         if current_task is not None:
@@ -157,11 +191,26 @@ async def send_manager_message(
             workplace_context,
         )
 
+    reply_msg.simulation_id = simulation.id if simulation is not None else None
+    reply_msg.in_reply_to_id = student_msg.id
+
     state.communication_frequency += 1
     db.add(state)
     log_activity(db, company_id, actor=user.student_id, action="chat:manager", detail=payload.content[:200])
 
     from app.services.workplace_scenarios import announce_requirement_change, issue_requirement_change
+
+    if simulation is not None:
+        from app.services.simulation.interaction_history_service import record_interaction
+        record_interaction(
+            db, simulation,
+            situation=workplace_context,
+            student_response=payload.content,
+            decision="ask_manager_question" if "?" in payload.content else "message_manager",
+            interaction_type="manager_message",
+            task_id=simulation.current_task_id,
+            metadata={"message_id": str(student_msg.id), "channel": "manager"},
+        )
 
     if simulation is not None and simulation.current_task_id is not None:
         work_task = db.get(Task, simulation.current_task_id)
@@ -225,6 +274,10 @@ async def send_team_message(
     ai_service: AIService = Depends(get_ai_service),
 ):
     company = _get_owned_company(company_id, db, user)
+    db.execute(select(Company.id).where(Company.id == company_id).with_for_update()).first()
+    retry = _find_retry_exchange(db, company_id, user.student_id, payload, MessageSenderType.TEAM_MEMBER)
+    if retry is not None:
+        return retry
     project = _project_for(db, company_id)
     teammate = db.get(TeamMember, team_member_id)
     if teammate is None or teammate.company_id != company_id:
@@ -242,6 +295,7 @@ async def send_team_message(
     student_msg = Message(
         company_id=company_id, sender_type=MessageSenderType.STUDENT,
         sender_id=user.student_id, content=payload.content,
+        idempotency_key=payload.idempotency_key,
     )
     db.add(student_msg)
     db.flush()
@@ -290,6 +344,26 @@ async def send_team_message(
         sender_id=str(teammate.id), content=reply_text,
     )
     db.add(reply_msg)
+    from app.models.simulation import Simulation
+    simulation = db.execute(select(Simulation).where(
+        Simulation.project_id == project.id,
+        Simulation.student_id == user.student_id,
+    ).order_by(Simulation.created_at.desc())).scalars().first()
+    if simulation is not None:
+        student_msg.simulation_id = simulation.id
+        reply_msg.simulation_id = simulation.id
+    reply_msg.in_reply_to_id = student_msg.id
+    if simulation is not None:
+        from app.services.simulation.interaction_history_service import record_interaction
+        record_interaction(
+            db, simulation,
+            situation=f"Team communication with {teammate.name}",
+            student_response=payload.content,
+            decision="ask_teammate_question" if "?" in payload.content else "message_teammate",
+            interaction_type="team_message",
+            task_id=task.id if task else simulation.current_task_id,
+            metadata={"message_id": str(student_msg.id), "teammate_id": str(teammate.id), "channel": "team"},
+        )
     log_activity(db, company_id, actor=user.student_id, action="chat:team", detail=payload.content[:200])
     db.commit()
     db.refresh(student_msg)

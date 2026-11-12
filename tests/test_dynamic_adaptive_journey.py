@@ -25,20 +25,21 @@ from app.models.enums import (
 )
 from app.models.assessment import AssessmentAttempt, AssessmentQuestion
 from app.models.company import Company
-from app.models.intelligence import StudentProfile
+from app.models.intelligence import InteractionEvaluation, StudentProfile
 from app.models.project import Project
 from app.models.simulation import Simulation
 from app.models.sprint import Sprint
 from app.models.submission import AIReview, Submission, SubmissionVersion
 from app.models.task import Task, TaskDependency
 from app.models.task_path import SimulationTaskPath
+from app.models.simulation_interaction import SimulationInteraction
 
 from app.services.assessment_service import (
     generate_dynamic_baseline_questions,
     start_attempt,
     submit_attempt,
 )
-from app.services.generators.dynamic_task_generator import generate_dynamic_task
+from app.services.generators.dynamic_task_generator import generate_dynamic_task, _build_fallback_dynamic_task
 from app.services.intelligence_service import calculate_performance_trend, get_or_create_profile
 from app.services.proactive_chat_service import is_due
 from app.models.enums import MessageSenderType
@@ -85,7 +86,7 @@ def test_baseline_completion_calculates_level(db, mock_student, baseline_evaluat
 
 
 @pytest.mark.asyncio
-async def test_dynamic_task_generation_and_adaptation(db, mock_student):
+async def test_dynamic_task_generation_and_adaptation(db, mock_student, monkeypatch):
     """Verify dynamic next task generation considers previous task work and sprint objective."""
     student_id = mock_student["student_id"]
     
@@ -135,21 +136,97 @@ async def test_dynamic_task_generation_and_adaptation(db, mock_student):
     assert task1.task_metadata is not None
     assert "hints" in task1.task_metadata
     assert "recommended_team_role" in task1.task_metadata
+    assert task1.task_metadata["objectives"]
+    assert task1.task_metadata["deliverables"]
+    assert task1.task_metadata["dynamic_generation_key"]
+    assert task1.task_metadata["dependency_strategy"] in {"independent", "previous", "foundation"}
 
     # Complete Task 1 and generate Task 2
     task1.status = TaskStatus.COMPLETED
     db.add(task1)
     db.flush()
 
+    # Module 3 owns the evaluation; Module 2 consumes its persisted output.
+    interaction = SimulationInteraction(
+        simulation_id=simulation.id, student_id=student_id, task_id=task1.id,
+        sequence=1, situation="Review response", student_response="I clarified the trade-off.",
+        interaction_type="adaptive_situation",
+    )
+    db.add(interaction)
+    db.flush()
+    db.add(InteractionEvaluation(
+        interaction_id=interaction.id, simulation_id=simulation.id, student_id=student_id,
+        overall_score=91, competencies={"communication": 88}, strengths=["clear trade-offs"],
+        weaknesses=["operational monitoring"], feedback="Good rationale.",
+        recommendations=["Add monitoring coverage."], branch_selected="high_performance",
+        difficulty_delta=1, confidence=0.9,
+    ))
+    db.flush()
+    original_competencies = dict(get_or_create_profile(db, student_id).current_competencies)
+    captured_prompts = []
+
+    class CapturingAI:
+        async def generate_json(self, prompt, system_prompt=None):
+            captured_prompts.append(prompt)
+            return {
+                "title": "Advanced monitored API integration", "description": "Integrate and instrument the API.",
+                "objectives": ["Integrate monitoring"], "deliverables": ["Instrumented API"],
+                "acceptance_criteria": ["Metrics and tests pass"], "dependency_strategy": "previous",
+                "priority": "medium", "task_type": "coding", "difficulty": "advanced",
+            }
+
+    monkeypatch.setattr(
+        "app.services.generators.dynamic_task_generator.get_ai_service", lambda: CapturingAI()
+    )
+
     task2 = await generate_dynamic_task(db, simulation, sprint, student_id, previous_task=task1)
     assert task2.id is not None
     assert task2.id != task1.id
     assert task2.task_metadata["previous_task_id"] == str(task1.id)
+    assert "high_performance" in captured_prompts[0]
+    assert "operational monitoring" in captured_prompts[0]
+    assert task2.task_metadata["module3_progression_evidence"]["branch_selected"] == "high_performance"
+    assert get_or_create_profile(db, student_id).current_competencies == original_competencies
+    retry_task2 = await generate_dynamic_task(db, simulation, sprint, student_id, previous_task=task1)
+    assert retry_task2.id == task2.id
     
     # Dependency check
     deps = db.execute(select(TaskDependency).where(TaskDependency.task_id == task2.id)).scalars().all()
     assert len(deps) == 1
     assert deps[0].depends_on_task_id == task1.id
+
+
+def test_deterministic_dynamic_fallback_varies_work_and_deliverables():
+    sprint = Sprint(sprint_number=1, goal="Deliver the customer profile API")
+    first = _build_fallback_dynamic_task(
+        sprint, "Backend Developer", DifficultyLevel.INTERMEDIATE, 1, None, "stable",
+        technologies=["Python", "PostgreSQL"], technical_domain="backend",
+    )
+    second = _build_fallback_dynamic_task(
+        sprint, "Backend Developer", DifficultyLevel.INTERMEDIATE, 2, None, "stable",
+        technologies=["Python", "PostgreSQL"], technical_domain="backend",
+    )
+    assert first["objectives"] != second["objectives"]
+    assert first["deliverables"] != second["deliverables"]
+    assert first["acceptance_criteria"] != second["acceptance_criteria"]
+    assert first["task_type"] != second["task_type"]
+    assert first["dependency_strategy"] != second["dependency_strategy"]
+
+    struggling = _build_fallback_dynamic_task(
+        sprint, "Backend Developer", DifficultyLevel.INTERMEDIATE, 1, None, "stable",
+        technologies=["Python"], progression_signal="consistently_weak",
+    )
+    moderate = _build_fallback_dynamic_task(
+        sprint, "Backend Developer", DifficultyLevel.INTERMEDIATE, 1, None, "stable",
+        technologies=["Python"], progression_signal="stable",
+    )
+    high_performing = _build_fallback_dynamic_task(
+        sprint, "Backend Developer", DifficultyLevel.INTERMEDIATE, 1, None, "stable",
+        technologies=["Python"], progression_signal="consistently_strong",
+    )
+    assert struggling["title"].startswith("[Scaffolded]")
+    assert moderate["title"].startswith("[Core]")
+    assert high_performing["title"].startswith("[Advanced]")
 
 
 def test_resubmission_version_review_preservation(db, mock_student):

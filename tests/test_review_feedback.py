@@ -13,7 +13,8 @@ from app.main import app
 from app.services.ai.ai_service import AIService, get_ai_service
 from app.services.ai.prompt_builder import build_review_prompt
 from app.services.ai.review_service import shape_review_feedback
-
+from app.core.database import SessionLocal
+from app.models.task import Task
 
 CHANGES_PAYLOAD = {
     "result": "changes_required",
@@ -45,14 +46,48 @@ CHANGES_PAYLOAD = {
 }
 
 
+def _criteria_snapshot(version_id):
+    """Read the immutable criteria recorded when this submission was created."""
+    from app.models.submission import SubmissionVersion
+
+    db = SessionLocal()
+    try:
+        version = db.get(SubmissionVersion, version_id)
+        assert version is not None
+        snapshot = (version.version_metadata or {}).get("acceptance_criteria_snapshot")
+        assert isinstance(snapshot, list), "submission is missing its criteria snapshot"
+        return list(snapshot)
+    finally:
+        db.close()
+
+
+def _review_payload_for_criteria(criteria):
+    payload = dict(CHANGES_PAYLOAD)
+    payload["acceptance_criteria"] = [
+        {
+            "criterion": str(criterion),
+            "met": index > 0,
+            "evidence": (
+                "Not demonstrated in the submitted evidence."
+                if index == 0 else "Addressed in the submitted evidence."
+            ),
+        }
+        for index, criterion in enumerate(criteria)
+    ]
+    return payload
+
+
 class _DemandingReviewer(AIService):
     """Deterministic reviewer requesting changes with specific guidance."""
+
+    def __init__(self, criteria):
+        self.criteria = criteria
 
     async def generate_text(self, prompt, system_prompt=None):
         return "review"
 
     async def generate_json(self, prompt, system_prompt=None):
-        return dict(CHANGES_PAYLOAD)
+        return _review_payload_for_criteria(self.criteria)
 
 
 def _generate(client, auth_headers, student_id="student_001"):
@@ -162,7 +197,7 @@ def test_changes_requested_exposes_specific_feedback(client, auth_headers):
     assert submitted.status_code == 201, submitted.text
     version_id = submitted.json()["version_id"]
 
-    app.dependency_overrides[get_ai_service] = lambda: _DemandingReviewer()
+    app.dependency_overrides[get_ai_service] = lambda: _DemandingReviewer(_criteria_snapshot(version_id))
     try:
         reviewed = client.post(
             f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
@@ -180,10 +215,8 @@ def test_changes_requested_exposes_specific_feedback(client, auth_headers):
     feedback = body["review_feedback"]
     assert feedback is not None
     assert any("auth.py" in change for change in feedback["required_changes"])
-    assert any(
-        item["criterion"] == "Returns 400 for invalid input" and "auth.py" in item["evidence"]
-        for item in feedback["unmet_criteria"]
-    )
+    assert feedback["unmet_criteria"]
+    assert feedback["unmet_criteria"][0]["criterion"] in _criteria_snapshot(version_id)
     assert "pytest" in (feedback["testing_feedback"] or "")
     assert feedback["score"] == 62
 
@@ -200,7 +233,7 @@ def test_metadata_response_is_analyzed_not_ignored(client, auth_headers):
 
         async def generate_json(self, prompt, system_prompt=None):
             self.prompts.append(prompt)
-            return dict(CHANGES_PAYLOAD)
+            return _review_payload_for_criteria(_criteria_snapshot(version_id))
 
     data, sim_id, task_id = _start_task(client, auth_headers)
     version_id = _submit_task_version(
@@ -233,7 +266,7 @@ def test_slow_provider_fails_without_fabricating_review_and_retry_is_safe(client
 
         async def generate_json(self, prompt, system_prompt=None):
             await asyncio.sleep(0.2)
-            return dict(CHANGES_PAYLOAD)
+            return _review_payload_for_criteria(_criteria_snapshot(version_id))
 
     monkeypatch.setattr("app.services.ai.review_service.REVIEW_PROVIDER_TIMEOUT_SECONDS", 0.01)
     data, sim_id, task_id = _start_task(client, auth_headers)
@@ -289,7 +322,7 @@ def test_malformed_provider_output_is_a_failed_retryable_review(client, auth_hea
     data, sim_id, task_id = _start_task(client, auth_headers)
     version_id = _submit_task_version(
         client, auth_headers, sim_id, task_id,
-        metadata='{"response":"Implemented a real request parser with input validation, error handling, tests, and a detailed explanation of each required behavior."}',
+        metadata='{"response":"Implemented a real request parser in request_parser.py with explicit validation for missing and malformed fields, returns the documented 400 response for invalid input, adds automated tests for valid and invalid requests, and verified the tests pass."}',
     )
     app.dependency_overrides[get_ai_service] = lambda: _MalformedReviewer()
     try:
@@ -319,7 +352,7 @@ def test_empty_submission_gets_missing_evidence_review(client, auth_headers):
     engine = _ce(os.environ["DATABASE_URL"])
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE submission_versions SET files = '[]'::jsonb, version_metadata = '{}'::jsonb WHERE id = :id"),
+            text("UPDATE submission_versions SET files = '[]'::jsonb, version_metadata = version_metadata - 'response' WHERE id = :id"),
             {"id": version_id},
         )
     reviewed = client.post(
@@ -359,7 +392,7 @@ def test_thin_submission_never_reaches_the_model(client, auth_headers):
 
         async def generate_json(self, prompt, system_prompt=None):
             self.prompts.append(prompt)
-            return dict(CHANGES_PAYLOAD)
+            return _review_payload_for_criteria(_criteria_snapshot(version_id))
 
     data, sim_id, task_id = _start_task(client, auth_headers)
     version_id = _submit_task_version(
@@ -403,7 +436,7 @@ def test_submitted_file_content_reaches_the_reviewer(client, auth_headers):
 
         async def generate_json(self, prompt, system_prompt=None):
             self.prompts.append(prompt)
-            return dict(CHANGES_PAYLOAD)
+            return _review_payload_for_criteria(_criteria_snapshot(version_id))
 
     import io
 
@@ -433,7 +466,7 @@ def test_submitted_file_content_reaches_the_reviewer(client, auth_headers):
 def test_review_feedback_is_stable_across_reads(client, auth_headers):
     data, sim_id, task_id = _start_task(client, auth_headers)
     version_id = _submit_task_version(client, auth_headers, sim_id, task_id)
-    app.dependency_overrides[get_ai_service] = lambda: _DemandingReviewer()
+    app.dependency_overrides[get_ai_service] = lambda: _DemandingReviewer(_criteria_snapshot(version_id))
     try:
         assert client.post(
             f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
@@ -447,7 +480,7 @@ def test_review_feedback_is_stable_across_reads(client, auth_headers):
 
 
 def test_ai_failure_uses_deterministic_review_and_resolves_state(client, auth_headers):
-    """A failed Gemini call falls back and never strands a task in UNDER_REVIEW."""
+    """A provider failure is persisted without fabricating a review or score."""
     from sqlalchemy import select as _select
 
     from app.core.database import SessionLocal
@@ -465,7 +498,7 @@ def test_ai_failure_uses_deterministic_review_and_resolves_state(client, auth_he
     data, sim_id, task_id = _start_task(client, auth_headers)
     version_id = _submit_task_version(
         client, auth_headers, sim_id, task_id,
-        metadata='{"response": "I added null checks to the login handler in auth.py so blank passwords return a 400 response instead of crashing, wired the error branch to the existing JSON error format, and verified the 400 path manually with curl. I also added unit tests covering wrong-password and blank-password cases in test_auth.py and ran the full pytest suite green before submitting."}',
+        metadata='{"response": "Implemented request validation and error handling in auth.py so blank passwords return the documented 400 JSON response. Added pytest cases for blank passwords, wrong passwords, missing fields, and successful login, and ran the tests to verify both success and error behavior."}',
     )
     app.dependency_overrides[get_ai_service] = lambda: _BrokenReviewer()
     try:
@@ -475,8 +508,7 @@ def test_ai_failure_uses_deterministic_review_and_resolves_state(client, auth_he
         )
     finally:
         app.dependency_overrides.pop(get_ai_service, None)
-    assert reviewed.status_code == 201, reviewed.text
-    assert reviewed.json()["result"] == "changes_required"
+    assert reviewed.status_code == 503, reviewed.text
 
     db = SessionLocal()
     try:
@@ -484,6 +516,8 @@ def test_ai_failure_uses_deterministic_review_and_resolves_state(client, auth_he
             _select(AIReview).where(AIReview.version_id == version_id)
         ).scalars().all()
         assert len(rows) == 1, "failed provider review should be persisted for retry"
+        assert rows[0].status.value == "failed"
+        assert rows[0].score is None
         version = db.get(SubmissionVersion, version_id)
         assert version.status.value == "under_review"
         task = db.get(Task, version.submission.task_id)
@@ -561,14 +595,16 @@ async def test_review_runs_once_per_version(client, auth_headers):
 
         async def generate_json(self, prompt, system_prompt=None):
             payload = dict(CHANGES_PAYLOAD)
-            payload["acceptance_criteria"] = [
-                {"criterion": str(criterion), "met": False, "evidence": "Not implemented in submitted code."}
-                for criterion in (version.submission.task.acceptance_criteria or [])
-            ]
+            payload["acceptance_criteria"] = _review_payload_for_criteria(
+                (version.version_metadata or {}).get("acceptance_criteria_snapshot", [])
+            )["acceptance_criteria"]
             return payload
 
     data, sim_id, task_id = _start_task(client, auth_headers)
-    version_id = _submit_task_version(client, auth_headers, sim_id, task_id)
+    version_id = _submit_task_version(
+        client, auth_headers, sim_id, task_id,
+        metadata='{"response":"Implemented request validation in request_parser.py for missing and malformed fields, returns the documented 400 response for invalid requests, and added automated tests covering valid input and each validation error. Ran the test suite and verified the expected status codes and response bodies."}',
+    )
     db = SessionLocal()
     try:
         version = db.get(SubmissionVersion, version_id)

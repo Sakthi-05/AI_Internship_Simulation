@@ -20,8 +20,8 @@ _ROLES = ["Senior Engineer", "Backend Engineer", "Frontend Engineer", "QA Engine
 _PERSONALITIES = ["meticulous", "laid-back", "blunt", "enthusiastic", "quietly sharp"]
 
 
-def generate_team_members(db: Session, company_id) -> List[TeamMember]:
-    rng = random.Random()
+def generate_team_members(db: Session, company_id, *, deterministic_seed: str | None = None) -> List[TeamMember]:
+    rng = random.Random(deterministic_seed) if deterministic_seed is not None else random.Random()
     names = rng.sample(_NAMES, k=3)
     members = []
     for name in names:

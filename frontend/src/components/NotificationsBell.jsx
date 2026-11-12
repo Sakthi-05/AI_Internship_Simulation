@@ -4,7 +4,7 @@ import { useNotifications } from "../hooks/useApi";
 
 export default function NotificationsBell({ companyId }) {
   const [open, setOpen] = useState(false);
-  const { data: notifications, markRead } = useNotifications(companyId);
+  const { data: notifications, markRead, isLoading, error, refetch } = useNotifications(companyId);
   const unread = (notifications || []).filter((n) => !n.is_read);
 
   return (
@@ -35,7 +35,10 @@ export default function NotificationsBell({ companyId }) {
               className="popover absolute right-0 top-full z-50 mt-2 max-h-96 w-80 overflow-y-auto p-2"
             >
               <p className="eyebrow px-2 pb-1 pt-2">Inbox</p>
-              {(notifications || []).length === 0 && (
+              {isLoading && <p className="px-2 py-3 text-xs text-text-faint">Loading notifications…</p>}
+              {error && <div className="m-1 rounded-lg border border-status-blocked/30 p-2 text-xs text-status-blocked" role="alert">Could not load notifications: {error.message}<button className="btn-ghost mt-2 w-full" onClick={() => refetch()}>Retry</button></div>}
+              {markRead.error && <p className="m-1 rounded-lg border border-status-blocked/30 p-2 text-xs text-status-blocked" role="alert">Notification update failed: {markRead.error.message}</p>}
+              {!isLoading && !error && (notifications || []).length === 0 && (
                 <div className="flex flex-col items-center px-3 py-6 text-center">
                   <span className="mb-2 text-2xl opacity-60">📭</span>
                   <p className="text-xs font-medium text-text-muted">All caught up</p>
@@ -58,6 +61,7 @@ export default function NotificationsBell({ companyId }) {
                     {n.notification_type.replace(/_/g, " ")}
                   </p>
                   <p className="mt-0.5 leading-relaxed text-text-muted">{n.message}</p>
+                  {n.created_at && <p className="mt-1 text-[10px] text-text-faint">{new Date(n.created_at).toLocaleString()}</p>}
                 </motion.button>
               ))}
             </motion.div>

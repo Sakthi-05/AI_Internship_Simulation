@@ -58,21 +58,23 @@ def _service():
 
 @pytest.mark.asyncio
 async def test_503_then_success_returns_text_with_one_retry(monkeypatch, _patch_sleep):
+    monkeypatch.setattr(ai_service.random, "uniform", lambda low, high: high)
     calls = _patch_client(monkeypatch, [_resp(503), _resp(200, _ok_payload("recovered"))])
     text = await _service()._call("prompt", None)
     assert text == "recovered"
     assert len(calls) == 2
-    assert _patch_sleep == [pytest.approx(1.0)]
+    assert _patch_sleep == [pytest.approx(0.5)]
 
 
 @pytest.mark.asyncio
 async def test_persistent_503_raises_after_retry(monkeypatch, _patch_sleep):
-    calls = _patch_client(monkeypatch, [_resp(503), _resp(503)])
+    monkeypatch.setattr(ai_service.random, "uniform", lambda low, high: high)
+    calls = _patch_client(monkeypatch, [_resp(503), _resp(503), _resp(503)])
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         await _service()._call("prompt", None)
     assert exc_info.value.response.status_code == 503
-    assert len(calls) == 2
-    assert len(_patch_sleep) == 1
+    assert len(calls) == 3
+    assert _patch_sleep == [pytest.approx(0.5), pytest.approx(1.0)]
 
 
 @pytest.mark.asyncio
@@ -86,10 +88,38 @@ async def test_non_503_error_raises_immediately_without_retry(monkeypatch, _patc
 
 def test_is_transient_ai_overload():
     assert is_transient_ai_overload(_wrap(_resp(503))) is True
-    assert is_transient_ai_overload(_wrap(_resp(429))) is False
-    assert is_transient_ai_overload(_wrap(_resp(500))) is False
+    assert is_transient_ai_overload(_wrap(_resp(429))) is True
+    assert is_transient_ai_overload(_wrap(_resp(500))) is True
     assert is_transient_ai_overload(ValueError("boom")) is False
     assert is_transient_ai_overload(None) is False
+
+
+@pytest.mark.asyncio
+async def test_429_retry_after_is_respected(monkeypatch, _patch_sleep):
+    monkeypatch.setattr(ai_service.random, "uniform", lambda low, high: 0.1)
+    overloaded = _resp(429)
+    overloaded.headers["Retry-After"] = "2"
+    calls = _patch_client(monkeypatch, [overloaded, _resp(200, _ok_payload("recovered"))])
+    assert await _service()._call("prompt", None) == "recovered"
+    assert len(calls) == 2
+    assert _patch_sleep == [pytest.approx(2.0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [httpx.TimeoutException("timeout"), httpx.ConnectError("offline")])
+async def test_timeout_and_network_errors_retry(monkeypatch, _patch_sleep, failure):
+    calls = []
+
+    class _FailThenSucceed(_FakeClient):
+        async def post(self, *args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise failure
+            return _resp(200, _ok_payload("recovered"))
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FailThenSucceed([], calls))
+    assert await _service()._call("prompt", None) == "recovered"
+    assert len(calls) == 2
 
 
 def _wrap(response):

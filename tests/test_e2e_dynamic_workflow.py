@@ -104,11 +104,9 @@ def test_project(db: Session, test_company):
     return project
 
 
+
 def test_dynamic_baseline_generation(db: Session, fresh_student, monkeypatch):
     """Test that baseline is generated dynamically based on student profile."""
-    # Create student profile with specific skills
-    from app.models.assessment import StudentSkill, Skill
-    from app.services.assessment_service import ensure_skill_catalog, replace_student_skills
     import app.services.assessment_service as assessment_service
     from app.services.ai.ai_service import AIService
 
@@ -118,62 +116,88 @@ def test_dynamic_baseline_generation(db: Session, fresh_student, monkeypatch):
 
         async def generate_json(self, prompt, system_prompt=None):
             prompts = [
-                ("How does Python resolve a module imported from a package subdirectory?", "technical_knowledge"),
-                ("Which FastAPI dependency pattern reuses a database session per request?", "technical_knowledge"),
-                ("How would you add an index to speed up this PostgreSQL lookup?", "problem_solving"),
-                ("What boundary case should a Python parser handle for an empty input?", "critical_thinking"),
-                ("Which FastAPI status code represents a missing resource response?", "technical_knowledge"),
-                ("How can a PostgreSQL transaction keep two related writes consistent?", "decision_making"),
-                ("What test isolates a Python function from its external HTTP dependency?", "problem_solving"),
+                (
+                    "How would you compare Python data structures and algorithm complexity when choosing an implementation?",
+                    "technical_knowledge",
+                ),
+                (
+                    "How does Java object-oriented design use encapsulation and inheritance to assign class responsibilities?",
+                    "technical_knowledge",
+                ),
+                (
+                    "How would you implement a FastAPI API endpoint that validates requests and returns structured responses for error handling?",
+                    "problem_solving",
+                ),
+                (
+                    "How do you query an SQL relational database schema and join tables while preserving transaction consistency?",
+                    "critical_thinking",
+                ),
+                (
+                    "How would you model MongoDB document structure to maintain consistency when storing related records?",
+                    "problem_solving",
+                ),
+                (
+                    "How would you handle a Node.js client-server API endpoint contract when the service returns response errors?",
+                    "decision_making",
+                ),
+                (
+                    "How would you design JavaScript functions to analyze algorithm complexity and choose suitable data structures?",
+                    "technical_knowledge",
+                ),
             ]
-            return {"questions": [
-                {
-                    "prompt": question,
-                    "competency": competency,
-                    "question_type": "mcq",
-                    "options": [
-                        {"id": "a", "text": "Option A"},
-                        {"id": "b", "text": "Option B"},
-                        {"id": "c", "text": "Option C"},
-                        {"id": "d", "text": "Option D"},
-                    ],
-                    "correct_option": "a",
-                    "rubric_keywords": [],
-                    "difficulty": "intermediate",
-                }
-                for question, competency in prompts
-            ]}
 
-    monkeypatch.setattr(assessment_service, "get_ai_service", lambda: _BaselineAI())
-    
-    ensure_skill_catalog(db)
-    
-    # Self-rate skills
-    skills_data = [
-        {"name": "Python", "self_rating": 4},
-        {"name": "FastAPI", "self_rating": 3},
-        {"name": "PostgreSQL", "self_rating": 2},
-    ]
-    replace_student_skills(db, fresh_student, skills_data)
-    
-    # Start assessment attempt - should generate dynamic questions
+            options = [
+                {"id": "a", "text": "Use a clear design with appropriate validation"},
+                {"id": "b", "text": "Ignore the structure and skip validation"},
+                {"id": "c", "text": "Duplicate logic across every component"},
+                {"id": "d", "text": "Remove consistency checks from the implementation"},
+            ]
+
+            return {
+                "questions": [
+                    {
+                        "prompt": question,
+                        "competency": competency,
+                        "question_type": "mcq",
+                        "options": options,
+                        "correct_option": "a",
+                        "rubric_keywords": [],
+                        "difficulty": "intermediate",
+                    }
+                    for question, competency in prompts
+                ]
+            }
+
+    monkeypatch.setattr(
+        assessment_service,
+        "get_ai_service",
+        lambda: _BaselineAI(),
+    )
+
+    # The fresh_student fixture already creates a software-development
+    # technical profile with technology ratings.
+
     attempt_data = start_attempt(db, fresh_student)
-    
-    # Verify attempt was created
+
     assert attempt_data["status"] == "in_progress"
-    assert len(attempt_data["questions"]) > 0
-    
-    # Verify questions are persisted to attempt
-    attempt = db.get(AssessmentAttempt, uuid_module.UUID(attempt_data["id"]))
+    assert len(attempt_data["questions"]) == 7
+
+    attempt = db.get(
+        AssessmentAttempt,
+        uuid_module.UUID(attempt_data["id"]),
+    )
+
     assert attempt is not None
     assert attempt.generation_metadata is not None
     assert attempt.generation_metadata.get("dynamic") is True
-    
-    # Refreshing should NOT regenerate
+    assert attempt.generation_metadata.get("source") == "ai"
+
+    # Refreshing must not generate another assessment.
     attempt_data_2 = start_attempt(db, fresh_student)
     assert attempt_data_2["id"] == attempt_data["id"]
-    
+
     print("✓ Dynamic baseline generation works correctly")
+
 
 
 def test_dynamic_first_task_generation(db: Session, fresh_student, test_company, test_project, monkeypatch):
@@ -425,6 +449,31 @@ def test_sprint_objective_progression_not_count(db: Session, fresh_student, test
     assert progress["objective_complete"] is True
     
     print("✓ Sprint objective progression works correctly (not based on fixed count)")
+
+
+def test_empty_sprint_path_does_not_mark_sprint_completed(db: Session, fresh_student, test_company, test_project):
+    """A sprint with no tasks assigned to this simulation is not complete."""
+    from app.services.simulation.progression_service import _sync_sprint_completion
+
+    simulation = Simulation(
+        student_id=fresh_student,
+        company_id=test_company.id,
+        project_id=test_project.id,
+        title="Empty path regression",
+        description="No assigned tasks yet",
+        role=test_project.role,
+        difficulty=test_project.difficulty,
+        status=SimulationStatus.IN_PROGRESS,
+    )
+    db.add(simulation)
+    db.flush()
+    sprint = db.execute(
+        select(Sprint).where(Sprint.project_id == test_project.id).order_by(Sprint.sprint_number)
+    ).scalars().first()
+
+    asyncio.run(_sync_sprint_completion(db, simulation, sprint.id))
+
+    assert sprint.status != SprintStatus.COMPLETED
 
 
 def test_resubmission_version_flow(db: Session, fresh_student, test_company, test_project):

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
+import { invalidateWorkspaceQueries } from "../lib/workspaceSync";
 
 export function useGenerateSimulation() {
   return useMutation({
@@ -39,7 +40,7 @@ export function useProjectState(projectId) {
     queryKey: ["projectState", projectId],
     queryFn: async () => (await apiClient.get(`/api/projects/${projectId}/state`)).data,
     enabled: Boolean(projectId),
-    refetchInterval: 5000,
+    refetchInterval: 30000,
   });
 }
 
@@ -63,19 +64,14 @@ export function useBoard(projectId, simulationId) {
   });
 }
 
-export function useUpdateTaskStatus(projectId) {
+export function useUpdateTaskStatus() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ taskId, ...body }) => {
       const res = await apiClient.patch(`/api/tasks/${taskId}/status`, body);
       return res.data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["board", projectId] });
-      queryClient.invalidateQueries({ queryKey: ["projectState", projectId] });
-      queryClient.invalidateQueries({ queryKey: ["events", projectId] });
-      queryClient.invalidateQueries({ queryKey: ["timeline", projectId] });
-    },
+    onSuccess: () => invalidateWorkspaceQueries(queryClient),
   });
 }
 
@@ -87,9 +83,10 @@ export function useReportBug(projectId) {
       return res.data;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["projectState", projectId] });
-      queryClient.invalidateQueries({ queryKey: ["events", projectId] });
-      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      return Promise.all([
+        invalidateWorkspaceQueries(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["projectState", projectId] }),
+      ]);
     },
   });
 }
@@ -113,9 +110,9 @@ export function useManagerChat(companyId) {
     refetchInterval: 15000,
   });
   const send = useMutation({
-    mutationFn: async (content) =>
-      (await apiClient.post(`/api/companies/${companyId}/chat/manager`, { content })).data,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["chat", "manager", companyId] }),
+    mutationFn: async ({ content, idempotency_key }) =>
+      (await apiClient.post(`/api/companies/${companyId}/chat/manager`, { content, idempotency_key })).data,
+    onSuccess: () => invalidateWorkspaceQueries(queryClient),
   });
   return { history, send };
 }
@@ -130,9 +127,9 @@ export function useTeamChat(companyId, teammateId) {
     refetchInterval: 15000,
   });
   const send = useMutation({
-    mutationFn: async (content) =>
-      (await apiClient.post(`/api/companies/${companyId}/chat/team/${teammateId}`, { content })).data,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["chat", "team", companyId, teammateId] }),
+    mutationFn: async ({ content, idempotency_key }) =>
+      (await apiClient.post(`/api/companies/${companyId}/chat/team/${teammateId}`, { content, idempotency_key })).data,
+    onSuccess: () => invalidateWorkspaceQueries(queryClient),
   });
   return { history, send };
 }
@@ -179,9 +176,28 @@ export function useMeetings(projectId) {
   const complete = useMutation({
     mutationFn: async ({ meetingId, ...body }) =>
       (await apiClient.patch(`/api/projects/${projectId}/meetings/${meetingId}/complete`, body)).data,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["meetings", projectId] }),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["meetings", projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["timeline", projectId] }),
+    ]),
   });
-  return { ...query, complete };
+  const respond = useMutation({
+    mutationFn: async ({ meetingId, ...body }) =>
+      (await apiClient.post(`/api/projects/${projectId}/meetings/${meetingId}/respond`, body)).data,
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["meetings", projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["timeline", projectId] }),
+    ]),
+  });
+  const update = useMutation({
+    mutationFn: async ({ meetingId, ...body }) =>
+      (await apiClient.patch(`/api/projects/${projectId}/meetings/${meetingId}`, body)).data,
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["meetings", projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["timeline", projectId] }),
+    ]),
+  });
+  return { ...query, complete, respond, update };
 }
 
 export function useTimeline(projectId) {

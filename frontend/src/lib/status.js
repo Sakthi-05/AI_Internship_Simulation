@@ -1,4 +1,4 @@
-export const STATUS_ORDER = ["backlog", "todo", "in_progress", "submitted", "under_review", "blocked", "completed"];
+export const STATUS_ORDER = ["backlog", "todo", "in_progress", "submitted", "under_review", "changes_requested", "manager_approval", "blocked", "completed"];
 
 export const STATUS_META = {
   backlog: { label: "Backlog", color: "var(--color-status-backlog)" },
@@ -6,6 +6,8 @@ export const STATUS_META = {
   in_progress: { label: "In Progress", color: "var(--color-status-progress)" },
   submitted: { label: "Submitted", color: "var(--color-status-review)" },
   under_review: { label: "Under Review", color: "var(--color-status-review)" },
+  changes_requested: { label: "Changes Requested", color: "var(--color-status-progress)" },
+  manager_approval: { label: "Manager Approval", color: "var(--color-status-completed)" },
   blocked: { label: "Blocked", color: "var(--color-status-blocked)" },
   completed: { label: "Completed", color: "var(--color-status-completed)" },
 };

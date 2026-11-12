@@ -26,6 +26,8 @@ from app.main import app
 from app.models.task import Task, TaskDependency
 from app.models.sprint import Sprint
 from app.models.project import Project
+from app.models.enums import TaskStatus
+from app.services.simulation.task_access_service import add_task_dependency, _dependencies_completed
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -381,6 +383,41 @@ class TestTaskDependenciesArePreserved:
         assert deps1.isdisjoint(tasks2_ids), (
             "Project 1 dependencies must not reference Project 2 tasks"
         )
+
+    def test_prerequisite_unlocks_only_after_completion(self):
+        db = SessionLocal()
+        try:
+            _, project_id = _create_company_and_project(db, "test_hierarchy")
+            _, task_ids = _seed_project_with_sprints_and_tasks(db, project_id, num_sprints=1, tasks_per_sprint=2)
+            dependent_id, prerequisite_id = task_ids[1], task_ids[0]
+            add_task_dependency(db, dependent_id, prerequisite_id)
+            assert not _dependencies_completed(db, dependent_id)
+
+            prerequisite = db.get(Task, prerequisite_id)
+            prerequisite.status = TaskStatus.COMPLETED
+            db.add(prerequisite)
+            db.flush()
+            assert _dependencies_completed(db, dependent_id)
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_dependency_creation_rejects_cycles_and_cross_project_edges(self):
+        db = SessionLocal()
+        try:
+            _, project_id = _create_company_and_project(db, "test_hierarchy")
+            _, first_project_tasks = _seed_project_with_sprints_and_tasks(db, project_id, num_sprints=1, tasks_per_sprint=2)
+            _, other_project_id = _create_company_and_project(db, "test_hierarchy")
+            _, other_project_tasks = _seed_project_with_sprints_and_tasks(db, other_project_id, num_sprints=1, tasks_per_sprint=2)
+
+            add_task_dependency(db, first_project_tasks[1], first_project_tasks[0])
+            with pytest.raises(ValueError, match="circular"):
+                add_task_dependency(db, first_project_tasks[0], first_project_tasks[1])
+            with pytest.raises(ValueError, match="same project"):
+                add_task_dependency(db, first_project_tasks[0], other_project_tasks[0])
+        finally:
+            db.rollback()
+            db.close()
 
 
 class TestCrossTenantBoardIsolation:

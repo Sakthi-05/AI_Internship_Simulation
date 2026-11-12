@@ -59,6 +59,14 @@ def _get_company_id_for_task(task: Task, db: Session) -> uuid.UUID:
 
 def _check_dependencies(db: Session, task: Task) -> None:
     """Check if all dependencies are completed. Raise HTTPException if blocked."""
+    from app.services.simulation.task_access_service import validate_project_dependency_graph
+    try:
+        validate_project_dependency_graph(db, task.sprint.project_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Task dependency graph is invalid: {exc}",
+        ) from exc
     dep_stmt = select(TaskDependency.depends_on_task_id).where(TaskDependency.task_id == task.id)
     dep_ids = db.execute(dep_stmt).scalars().all()
     if not dep_ids:
@@ -208,14 +216,17 @@ async def update_task_status(
 
     # Check dependencies FIRST for transitions that start work (IN_PROGRESS)
     # This ensures dependency errors (409) take precedence over transition errors (400)
-    if payload.status == TaskStatus.IN_PROGRESS:
+    if payload.status in (TaskStatus.IN_PROGRESS, TaskStatus.SUBMITTED, TaskStatus.COMPLETED):
         from app.services.simulation.task_access_service import require_current_task_for_active_project
         require_current_task_for_active_project(
             db,
             user.student_id,
             sprint.project_id,
             task.id,
-            allow_resubmission=task.status == TaskStatus.CHANGES_REQUESTED,
+            allow_resubmission=(
+                task.status == TaskStatus.CHANGES_REQUESTED
+                and payload.status == TaskStatus.IN_PROGRESS
+            ),
         )
         _check_dependencies(db, task)
 
@@ -294,6 +305,38 @@ async def update_task_status(
     ).scalar_one_or_none()
 
     _sync_project_state(db, task, previous_status, payload.status)
+
+    # Persist blockers as contextual simulation events and raw student evidence.
+    if payload.status == TaskStatus.BLOCKED:
+        from app.models.enums import SimulationStatus
+        from app.models.simulation import Simulation
+        from app.services.simulation.interaction_history_service import record_interaction
+        simulation = db.execute(select(Simulation).where(
+            Simulation.project_id == project.id,
+            Simulation.student_id == user.student_id,
+            Simulation.status == SimulationStatus.IN_PROGRESS,
+        ).order_by(Simulation.created_at.desc())).scalars().first()
+        if simulation is not None:
+            from app.services.engines.workflow_events_engine import trigger_stakeholder_message_event
+            event = await trigger_stakeholder_message_event(
+                db, simulation, task,
+                db.get(Scenario, simulation.current_scenario_id) if simulation.current_scenario_id else None,
+                task.blocked_reason or "The student reported a blocker.",
+                title="Workplace Blocker",
+                trigger_condition="task_blocked",
+                action_required=True,
+                metadata={"scenario_key": "blocker", "blocked_reason": task.blocked_reason},
+            )
+            record_interaction(
+                db, simulation,
+                situation=f"Blocker reported for {task.title}",
+                student_response=task.blocked_reason,
+                decision="report_blocker",
+                interaction_type="blocker_reported",
+                task_id=task.id,
+                scenario_id=event.scenario_id,
+                metadata={"event_id": str(event.id)},
+            )
 
     # Log activity
     action = get_transition_action(previous_status, payload.status)
@@ -386,7 +429,36 @@ async def report_bug(
         task_id=str(task.id),
     )
 
-    await workflow_engine.report_bug(db, project, state, f"Bug on '{task.title}': {payload.description}")
+    await workflow_engine.report_bug(db, project, state, f"Bug on '{task.title}': {payload.description}", task_id=task.id)
+
+    from app.models.enums import SimulationStatus
+    from app.models.simulation import Simulation
+    from app.services.simulation.interaction_history_service import record_interaction
+    simulation = db.execute(select(Simulation).where(
+        Simulation.project_id == project.id,
+        Simulation.student_id == user.student_id,
+        Simulation.status == SimulationStatus.IN_PROGRESS,
+    ).order_by(Simulation.created_at.desc())).scalars().first()
+    if simulation is not None:
+        from app.services.engines.workflow_events_engine import trigger_bug_report_event
+        event = await trigger_bug_report_event(
+            db, simulation, task,
+            db.get(Scenario, simulation.current_scenario_id) if simulation.current_scenario_id else None,
+            payload.description,
+            trigger_condition="student_bug_report",
+            notify_student=False,
+        )
+        record_interaction(
+            db, simulation,
+            situation=f"Bug reported for {task.title}",
+            student_response=payload.description,
+            decision="report_bug",
+            interaction_type="bug_reported",
+            task_id=task.id,
+            scenario_id=event.scenario_id,
+            metadata={"event_id": str(event.id)},
+        )
+        db.commit()
 
     await ws_manager.broadcast(
         str(project.company_id), "bug_reported", {"task_id": str(task.id), "description": payload.description}

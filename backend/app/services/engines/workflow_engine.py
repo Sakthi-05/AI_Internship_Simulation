@@ -89,7 +89,7 @@ async def evaluate_after_task_transition(
     db.commit()
 
 
-async def report_bug(db: Session, project: Project, state: ProjectState, description: str) -> None:
+async def report_bug(db: Session, project: Project, state: ProjectState, description: str, task_id=None) -> None:
     """'If bugs increase -> emergency meeting -> bug fixing sprint.'"""
     state.bug_count += 1
     state.stress_level = min(100, state.stress_level + 6)
@@ -97,7 +97,7 @@ async def report_bug(db: Session, project: Project, state: ProjectState, descrip
     db.add(state)
     db.flush()
 
-    await trigger_event(db, project, EventType.BUG_REPORT, description)
+    await trigger_event(db, project, EventType.BUG_REPORT, description, {"task_id": str(task_id)} if task_id else {})
 
     if state.bug_count % BUG_EMERGENCY_THRESHOLD == 0:
         await trigger_event(

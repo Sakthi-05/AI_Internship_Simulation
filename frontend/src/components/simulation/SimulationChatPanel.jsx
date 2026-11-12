@@ -97,6 +97,8 @@ function ChatThread({ kind, companyId, teammateId, managerName, team, activeLabe
   const { history, send } = kind === "manager" ? managerChat : teamChat;
   const messagesRef = useRef(null);
   const [draft, setDraft] = useState("");
+  const [sendError, setSendError] = useState("");
+  const pendingRequest = useRef(null);
 
   const messages = history.data || [];
 
@@ -117,12 +119,25 @@ function ChatThread({ kind, companyId, teammateId, managerName, team, activeLabe
     if (!draft.trim()) return;
     const text = draft;
     setDraft("");
-    await send.mutateAsync(text);
+    try {
+      if (pendingRequest.current?.content !== text) {
+        pendingRequest.current = { content: text, key: crypto.randomUUID() };
+      }
+      await send.mutateAsync({ content: text, idempotency_key: pendingRequest.current.key });
+      pendingRequest.current = null;
+      setSendError("");
+    } catch (error) {
+      setDraft(text);
+      setSendError(error.message || "Message could not be sent.");
+    }
   };
 
   return (
     <div className="flex h-full flex-col">
       <div ref={messagesRef} className="flex-1 space-y-2.5 overflow-y-auto p-2.5">
+        {history.isLoading && <p className="text-xs text-text-faint" role="status">Loading conversation…</p>}
+        {history.error && <div className="rounded-lg border border-status-blocked/30 p-2 text-xs text-status-blocked" role="alert">Conversation could not be loaded: {history.error.message}<button className="btn-ghost ml-2" onClick={() => history.refetch()}>Retry</button></div>}
+        {sendError && <p className="rounded-lg border border-status-blocked/30 p-2 text-xs text-status-blocked" role="alert">{sendError}</p>}
         <AnimatePresence initial={false}>
           {messages.map((m) => {
             const mine = m.sender_type === "student";
@@ -152,7 +167,7 @@ function ChatThread({ kind, companyId, teammateId, managerName, team, activeLabe
             );
           })}
         </AnimatePresence>
-        {messages.length === 0 && (
+        {messages.length === 0 && !history.isLoading && !history.error && (
           <div className="flex flex-col items-center px-2 py-6 text-center">
             <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-gradient-to-br from-brand-500/15 to-accent-cyan/10 text-base">
               💬

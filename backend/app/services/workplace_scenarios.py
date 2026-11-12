@@ -381,8 +381,7 @@ def record_requirement_reply(
 
     event.response = text
     event.responded_at = datetime.now(timezone.utc)
-    # A reply records communication. The event stays acknowledged until a later
-    # action is stored and adaptability has been evaluated from it.
+    # A reply is preserved as raw communication evidence for Module 3.
     if _status_value(event) != WorkflowEventStatus.ACKNOWLEDGED.value:
         event.status = WorkflowEventStatus.ACKNOWLEDGED
     metadata = _event_metadata(event)
@@ -399,10 +398,7 @@ def record_requirement_reply(
     _save_metadata(event, metadata)
     db.add(event)
     db.flush()
-    assessment = assess_requirement_change(db, simulation, task, event, student_id)
-    payload = serialize_workflow_event(db, event, task)
-    payload["assessment"] = assessment
-    return payload
+    return serialize_workflow_event(db, event, task)
 
 
 def record_subsequent_action(
@@ -448,11 +444,7 @@ def record_subsequent_action(
     _save_metadata(event, metadata)
     db.add(event)
     db.flush()
-    assessment = assess_requirement_change(db, simulation, task, event, student_id)
-    _resolve_when_adaptation_scored(db, event, assessment)
-    payload = serialize_workflow_event(db, event, task)
-    payload["assessment"] = assessment
-    return payload
+    return serialize_workflow_event(db, event, task)
 
 
 def record_task_submission_action(
@@ -461,6 +453,8 @@ def record_task_submission_action(
     task: Task,
     student_id: str,
     detail: str,
+    submission_id: Optional[str] = None,
+    version_id: Optional[str] = None,
 ) -> None:
     """Attach a submission to an open requirement change without failing the submit."""
     event = _existing_requirement_change(db, simulation, task)
@@ -475,13 +469,16 @@ def record_task_submission_action(
         "detail": (detail or "Submitted the task after the requirement change.").strip(),
         "at": datetime.now(timezone.utc).isoformat(),
         "student_id": student_id,
+        "event_id": str(event.id),
+        "submission_id": submission_id,
+        "version_id": version_id,
+        "criteria_version_id": metadata.get("criteria_version_id"),
+        "criteria_version_number": metadata.get("criteria_version_number"),
     })
     metadata["actions"] = actions
     _save_metadata(event, metadata)
     db.add(event)
     db.flush()
-    assessment = assess_requirement_change(db, simulation, task, event, student_id)
-    _resolve_when_adaptation_scored(db, event, assessment)
 
 
 def _resolve_when_adaptation_scored(db: Session, event: WorkflowEvent, assessment: Dict[str, Any]) -> None:
@@ -893,7 +890,13 @@ def _serialized_criteria(db: Session, task: Optional[Task]) -> List[str]:
     return required_texts(db, task)
 
 
-def serialize_workflow_event(db: Session, event: WorkflowEvent, task: Optional[Task] = None) -> Dict[str, Any]:
+def serialize_workflow_event(
+    db: Session,
+    event: WorkflowEvent,
+    task: Optional[Task] = None,
+    *,
+    acceptance_criteria: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     metadata = _event_metadata(event)
     scenario_key = metadata.get("scenario_key")
     status = _status_value(event)
@@ -915,14 +918,24 @@ def serialize_workflow_event(db: Session, event: WorkflowEvent, task: Optional[T
         "added_criterion": metadata.get("added_criterion") or event.updated_requirement,
         "criteria_version_id": metadata.get("criteria_version_id"),
         "criteria_version_number": metadata.get("criteria_version_number"),
-        "acceptance_criteria": _serialized_criteria(db, task),
+        "acceptance_criteria": (
+            acceptance_criteria if acceptance_criteria is not None else _serialized_criteria(db, task)
+        ),
         "acknowledged": status != WorkflowEventStatus.PENDING.value,
         "manager_message": metadata.get("manager_message"),
         "responded": event.response is not None,
         "response": event.response,
         "responded_at": event.responded_at.isoformat() if event.responded_at else None,
+        "metadata": metadata,
         "subsequent_actions": actions,
-        "assessment": assessment_for_event(db, event) if is_requirement else None,
+        # Module 2 stores communication and decision evidence. Module 3 owns
+        # all evaluation and scoring, so no score is computed or attached here.
+        "assessment": None,
+        "evidence": {
+            "response": event.response,
+            "responded_at": event.responded_at.isoformat() if event.responded_at else None,
+            "actions": actions,
+        },
     }
     payload["phase"] = workplace_phase(payload) if is_requirement else "idle"
     return payload

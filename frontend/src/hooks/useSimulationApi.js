@@ -27,7 +27,7 @@ export function useSimulation(simulationId) {
     queryKey: ["simulation", simulationId],
     queryFn: async () => (await apiClient.get(`/api/simulations/${simulationId}`)).data,
     enabled: Boolean(simulationId),
-    refetchInterval: 10000,
+    refetchInterval: 30000,
   });
 }
 
@@ -50,7 +50,7 @@ export function useSimulationProgress(simulationId) {
     queryKey: ["simulationProgress", simulationId],
     queryFn: async () => (await apiClient.get(`/api/simulations/${simulationId}/progress`)).data,
     enabled: Boolean(simulationId),
-    refetchInterval: 10000,
+    refetchInterval: 30000,
   });
 }
 
@@ -77,7 +77,7 @@ export function useCurrentTask(simulationId) {
     queryKey: ["currentTask", simulationId],
     queryFn: async () => (await apiClient.get(`/api/simulations/${simulationId}/tasks/current`)).data,
     enabled: Boolean(simulationId),
-    refetchInterval: 5000, // More frequent for timer
+    refetchInterval: 10000, // Keep the displayed deadline fresh without high-frequency full task reads.
   });
 }
 
@@ -88,12 +88,7 @@ export function useStartSimulationTask(simulationId) {
       const res = await apiClient.post(`/api/simulations/${simulationId}/tasks/${taskId}/start`);
       return res.data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["currentScenario", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["taskEvents", simulationId] });
-    },
+    onSuccess: () => refreshWorkplace(queryClient),
   });
 }
 
@@ -121,13 +116,7 @@ export function useCompleteSimulationTask(simulationId) {
       const res = await apiClient.post(`/api/simulations/${simulationId}/tasks/${taskId}/complete`);
       return res.data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["currentScenario", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["simulationProgress", simulationId] });
-      queryClient.invalidateQueries({ queryKey: ["taskEvents", simulationId] });
-    },
+    onSuccess: () => refreshWorkplace(queryClient),
   });
 }
 
@@ -136,7 +125,7 @@ export function useTaskEvents(simulationId, taskId) {
     queryKey: ["taskEvents", simulationId, taskId],
     queryFn: async () => (await apiClient.get(`/api/simulations/${simulationId}/tasks/${taskId}/events`)).data,
     enabled: Boolean(simulationId) && Boolean(taskId),
-    refetchInterval: 5000,
+    refetchInterval: 15000,
   });
 }
 

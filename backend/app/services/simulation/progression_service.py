@@ -16,14 +16,30 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import DifficultyLevel, EventType, ScenarioStatus, SimulationStatus, SprintStatus, TaskStatus
+from app.models.enums import (
+    DifficultyLevel, EventType, ReviewResult, ReviewStatus, ScenarioStatus,
+    SimulationStatus, SprintStatus, SubmissionStatus, TaskStatus,
+)
 from app.models.project import Project
 from app.models.project_state import ProjectState
 from app.models.sprint import Sprint
 from app.models.simulation import Simulation, Scenario, ScenarioTask
+from app.models.submission import AIReview, ReviewHistory, Submission, SubmissionVersion
 from app.models.task import Task
 from app.models.task_path import SimulationTaskPath
 from app.services.activity_log_service import log_activity
+
+
+def _notify_task_assignment(db: Session, simulation: Simulation, task: Task) -> None:
+    from app.models.enums import NotificationType
+    from app.services.notification_service import notify
+    notify(
+        db, simulation.company_id, NotificationType.TASK_ASSIGNED,
+        f"New task assigned: {task.title}",
+        simulation_id=simulation.id,
+        context={"task_id": str(task.id), "task_title": task.title},
+        dedupe_key=f"task-assigned:{simulation.id}:{task.id}",
+    )
 
 
 async def progress_to_next_task(
@@ -48,6 +64,8 @@ async def progress_to_next_task(
     if locked_simulation is None:
         return None
     simulation = locked_simulation
+    if simulation.status == SimulationStatus.COMPLETED:
+        return None
 
     # Check if task paths are in use for this simulation
     completed_path_entry = db.execute(
@@ -77,7 +95,34 @@ async def progress_to_next_task(
         from app.services.simulation.task_access_service import get_next_available_path_entry
         next_path_entry = get_next_available_path_entry(db, simulation.id)
 
-        if next_path_entry:
+        current_sprint = db.get(Sprint, completed_task.sprint_id)
+        next_sequential_sprint = None
+        if current_sprint and current_sprint.status == SprintStatus.COMPLETED:
+            next_sequential_sprint = db.execute(
+                select(Sprint).where(
+                    Sprint.project_id == current_sprint.project_id,
+                    Sprint.sprint_number == current_sprint.sprint_number + 1,
+                )
+            ).scalar_one_or_none()
+        next_path_task = db.get(Task, next_path_entry.task_id) if next_path_entry else None
+        next_sprint_has_pending_path = False
+        if next_sequential_sprint:
+            next_sprint_has_pending_path = db.execute(
+                select(SimulationTaskPath.id)
+                .join(Task, Task.id == SimulationTaskPath.task_id)
+                .where(
+                    SimulationTaskPath.simulation_id == simulation.id,
+                    Task.sprint_id == next_sequential_sprint.id,
+                    Task.status != TaskStatus.COMPLETED,
+                )
+            ).first() is not None
+        needs_sequential_task = bool(
+            next_sequential_sprint
+            and not next_sprint_has_pending_path
+            and (next_path_task is None or next_path_task.sprint_id != next_sequential_sprint.id)
+        )
+
+        if next_path_entry and not needs_sequential_task:
             next_task = db.get(Task, next_path_entry.task_id)
             if next_task:
                 next_task = _materialize_difficulty_task(db, simulation, next_path_entry, next_task)
@@ -98,6 +143,7 @@ async def progress_to_next_task(
                 db.add(next_path_entry)
                 db.add(simulation)
                 db.flush()
+                _notify_task_assignment(db, simulation, next_task)
 
                 log_activity(
                     db,
@@ -112,51 +158,6 @@ async def progress_to_next_task(
 
                 return next_task
 
-        # If no static path entry exists, check if current sprint requires a dynamic next task
-        # REMOVED: Fixed task-count logic (sprint_completed_count < 2)
-        # NOW: Sprint completion is determined by sprint objective, not arbitrary task count
-        # Dynamic tasks are now generated in the review pipeline after each approved task
-        # This section is kept for backward compatibility with legacy simulations
-        current_sprint = db.get(Sprint, completed_task.sprint_id)
-        if current_sprint and current_sprint.status != SprintStatus.COMPLETED:
-            # For dynamic mode, tasks are generated in review_service.py after approval
-            # This path is only reached for legacy simulations or if review generation failed
-            # We still provide a fallback task if the sprint is not complete
-            from app.services.generators.dynamic_task_generator import generate_dynamic_task
-            dyn_task = await generate_dynamic_task(db, simulation, current_sprint, user_id, completed_task)
-            dyn_task.status = TaskStatus.TODO
-
-            max_seq = db.execute(
-                select(SimulationTaskPath.sequence)
-                .where(SimulationTaskPath.simulation_id == simulation.id)
-                .order_by(SimulationTaskPath.sequence.desc())
-            ).scalars().first() or 0
-
-            new_entry = SimulationTaskPath(
-                simulation_id=simulation.id,
-                task_id=dyn_task.id,
-                sequence=max_seq + 1,
-                status=TaskStatus.TODO,
-            )
-            db.add(dyn_task)
-            db.add(new_entry)
-            simulation.current_task_id = dyn_task.id
-            simulation.progress = _calculate_simulation_progress(db, simulation)
-            db.add(simulation)
-            db.flush()
-
-            log_activity(
-                db,
-                company_id=simulation.company_id,
-                actor=user_id,
-                action="simulation_task_progressed",
-                detail=f"Fallback dynamic task '{dyn_task.title}' generated in sprint",
-                simulation_id=str(simulation.id),
-                task_id=str(dyn_task.id),
-                previous_task_id=str(completed_task.id),
-            )
-            return dyn_task
-
         remaining_path_task = db.execute(
             select(SimulationTaskPath.id)
             .join(Task, Task.id == SimulationTaskPath.task_id)
@@ -165,7 +166,7 @@ async def progress_to_next_task(
                 Task.status != TaskStatus.COMPLETED,
             )
         ).first()
-        if remaining_path_task:
+        if remaining_path_task and not needs_sequential_task:
             # A prerequisite not yet completed blocks the path. Do not mark the
             # simulation complete or skip to a later task.
             simulation.current_task_id = None
@@ -173,8 +174,17 @@ async def progress_to_next_task(
             db.flush()
             return None
 
-        # No more tasks in path - simulation is complete
-        return await _complete_simulation(db, simulation, user_id)
+        if needs_sequential_task:
+            return await _create_next_sprint_task(
+                db, simulation, completed_task, next_sequential_sprint, user_id,
+            )
+
+        if _module2_completion_ready(db, simulation):
+            return await _complete_simulation(db, simulation, user_id)
+        simulation.current_task_id = None
+        db.add(simulation)
+        db.flush()
+        return None
 
     # Fallback to original ScenarioTask-based progression
     # The legacy path follows the same one-current-task invariant as the
@@ -402,8 +412,15 @@ async def _complete_simulation(
     user_id: str,
 ) -> None:
     """Mark simulation as completed."""
+    if simulation.status == SimulationStatus.COMPLETED:
+        return
+    has_task_path = db.execute(
+        select(SimulationTaskPath.id).where(SimulationTaskPath.simulation_id == simulation.id)
+    ).first() is not None
+    if has_task_path and not _module2_completion_ready(db, simulation):
+        return
     simulation.status = SimulationStatus.COMPLETED
-    simulation.completed_at = datetime.now(timezone.utc)
+    simulation.completed_at = simulation.completed_at or datetime.now(timezone.utc)
     simulation.current_task_id = None
     simulation.current_scenario_id = None
     simulation.progress = 100
@@ -424,6 +441,131 @@ async def _complete_simulation(
         simulation_id=str(simulation.id),
         duration_minutes=duration_minutes,
     )
+
+
+def _module2_completion_ready(db: Session, simulation: Simulation) -> bool:
+    """Require the four-sprint lifecycle and all assigned review work resolved."""
+    from app.services.engines.sprint_engine import SPRINT_NAMES
+
+    sprints = db.execute(
+        select(Sprint).where(Sprint.project_id == simulation.project_id)
+        .order_by(Sprint.sprint_number)
+    ).scalars().all()
+    if [sprint.sprint_number for sprint in sprints] != [1, 2, 3, 4]:
+        return False
+    if [sprint.name for sprint in sprints] != list(SPRINT_NAMES):
+        return False
+    if any(sprint.status != SprintStatus.COMPLETED for sprint in sprints):
+        return False
+
+    entries = db.execute(
+        select(SimulationTaskPath).where(SimulationTaskPath.simulation_id == simulation.id)
+    ).scalars().all()
+    if not entries or any(entry.task is None or entry.task.status != TaskStatus.COMPLETED for entry in entries):
+        return False
+
+    for entry in entries:
+        submissions = db.execute(
+            select(Submission).where(
+                Submission.task_id == entry.task_id,
+                Submission.student_id == simulation.student_id,
+            )
+        ).scalars().all()
+        for submission in submissions:
+            if submission.current_version < 1 or submission.status != SubmissionStatus.APPROVED:
+                return False
+            version = db.execute(
+                select(SubmissionVersion).where(
+                    SubmissionVersion.submission_id == submission.id,
+                    SubmissionVersion.version_number == submission.current_version,
+                )
+            ).scalar_one_or_none()
+            if version is None or version.status != SubmissionStatus.APPROVED or version.submitted_at is None:
+                return False
+            review = db.execute(
+                select(AIReview).where(AIReview.version_id == version.id)
+                .order_by(AIReview.created_at.desc())
+            ).scalars().first()
+            if review is None or review.status != ReviewStatus.COMPLETED or review.result != ReviewResult.APPROVED:
+                return False
+            manager_approval = db.execute(
+                select(ReviewHistory.id).where(
+                    ReviewHistory.review_id == review.id,
+                    ReviewHistory.action == "manager_review",
+                    ReviewHistory.new_result == ReviewResult.APPROVED,
+                )
+            ).first()
+            if manager_approval is None:
+                return False
+    return True
+
+
+async def _create_next_sprint_task(
+    db: Session,
+    simulation: Simulation,
+    completed_task: Task,
+    target_sprint: Sprint,
+    user_id: str,
+) -> Task:
+    """Create the next sequential sprint task after the current work is approved."""
+    if simulation.status == SimulationStatus.COMPLETED:
+        raise ValueError("Cannot create a task for a completed simulation")
+    from app.services.generators.dynamic_task_generator import generate_dynamic_task
+
+    competency_focus = None
+    version = db.execute(
+        select(SubmissionVersion)
+        .join(Submission, Submission.id == SubmissionVersion.submission_id)
+        .where(
+            Submission.task_id == completed_task.id,
+            Submission.student_id == simulation.student_id,
+            SubmissionVersion.version_number == Submission.current_version,
+        )
+    ).scalar_one_or_none()
+    if version:
+        latest_review = db.execute(
+            select(AIReview).where(AIReview.version_id == version.id)
+            .order_by(AIReview.created_at.desc())
+        ).scalars().first()
+        if latest_review:
+            competency_focus = (latest_review.raw_payload or {}).get("competency_task_focus")
+
+    task = await generate_dynamic_task(
+        db, simulation, target_sprint, simulation.student_id, completed_task,
+        competency_focus=competency_focus,
+    )
+    task.status = TaskStatus.TODO
+    max_sequence = db.execute(
+        select(SimulationTaskPath.sequence)
+        .where(SimulationTaskPath.simulation_id == simulation.id)
+        .order_by(SimulationTaskPath.sequence.desc())
+    ).scalars().first() or 0
+    path_entry = SimulationTaskPath(
+        simulation_id=simulation.id,
+        task_id=task.id,
+        sequence=max_sequence + 1,
+        status=TaskStatus.TODO,
+    )
+    db.add(task)
+    db.add(path_entry)
+    _activate_sprint(db, target_sprint.id)
+    simulation.current_task_id = task.id
+    simulation.progress = _calculate_simulation_progress(db, simulation)
+    _sync_current_scenario(db, simulation, task)
+    db.add(simulation)
+    db.flush()
+    _notify_task_assignment(db, simulation, task)
+    log_activity(
+        db,
+        company_id=simulation.company_id,
+        actor=user_id,
+        action="simulation_task_progressed",
+        detail=f"Progressed to generated task '{task.title}' in Sprint {target_sprint.sprint_number}",
+        simulation_id=str(simulation.id),
+        task_id=str(task.id),
+        previous_task_id=str(completed_task.id),
+    )
+    return task
 
 
 def _calculate_simulation_progress(db: Session, simulation: Simulation) -> int:
@@ -470,12 +612,32 @@ async def _sync_sprint_completion(db: Session, simulation: Simulation, sprint_id
     if not sprint:
         return
 
-    unfinished = db.execute(
-        select(SimulationTaskPath.id)
+    required_task_ids = set(db.execute(
+        select(SimulationTaskPath.task_id)
         .join(Task, Task.id == SimulationTaskPath.task_id)
         .where(
             SimulationTaskPath.simulation_id == simulation.id,
             Task.sprint_id == sprint_id,
+        )
+    ).scalars().all())
+    if not required_task_ids:
+        # Preserve legacy scenario-only simulations without treating an empty
+        # path as completed. Their scenario tasks are the assigned work set.
+        required_task_ids = set(db.execute(
+            select(ScenarioTask.task_id)
+            .join(Scenario, Scenario.id == ScenarioTask.scenario_id)
+            .join(Task, Task.id == ScenarioTask.task_id)
+            .where(
+                Scenario.simulation_id == simulation.id,
+                Task.sprint_id == sprint_id,
+            )
+        ).scalars().all())
+    if not required_task_ids:
+        return
+
+    unfinished = db.execute(
+        select(Task.id).where(
+            Task.id.in_(required_task_ids),
             Task.status != TaskStatus.COMPLETED,
         )
     ).first()

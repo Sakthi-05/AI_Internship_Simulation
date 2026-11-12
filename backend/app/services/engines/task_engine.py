@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 from app.models.enums import DifficultyLevel, SprintStatus, TaskPriority, TaskStatus, TaskType
 from app.models.project import Project
 from app.models.sprint import Sprint
-from app.models.task import Task, TaskDependency
+from app.models.task import Task
+from app.services.engines.sprint_engine import SPRINT_NAMES
+from app.services.simulation.task_access_service import add_task_dependency
 
 _STORY_POINTS_BY_DIFFICULTY: Final[dict[DifficultyLevel, tuple[int, ...]]] = {
     DifficultyLevel.BEGINNER: (1, 2, 3),
@@ -234,7 +236,7 @@ def _create_default_sprints(db: Session, project: Project) -> list[Sprint]:
         sprint = Sprint(
             project_id=project.id,
             sprint_number=index + 1,
-            name=f"Sprint {index + 1}",
+            name=SPRINT_NAMES[index],
             goal=f"Deliver sprint {index + 1} objectives for {project.title}.",
             status=SprintStatus.ACTIVE if index == 0 else SprintStatus.PLANNED,
             start_date=cursor,
@@ -435,9 +437,4 @@ def _assign_module_dependencies(db: Session, module_tasks: Sequence[Task]) -> No
 
     anchor = module_tasks[0]
     for dependent in module_tasks[1:]:
-        db.add(
-            TaskDependency(
-                task_id=dependent.id,
-                depends_on_task_id=anchor.id,
-            )
-        )
+        add_task_dependency(db, dependent.id, anchor.id)

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useSimulation } from "../context/SimulationContext";
 import { useTimeline, useMeetings } from "../hooks/useApi";
@@ -19,8 +19,11 @@ export default function Timeline() {
   const { simulation } = useSimulation();
 
   const { data: timeline, isLoading, error, refetch } = useTimeline(simulation?.projectId);
-  const { data: meetings, complete, error: meetingsError } = useMeetings(simulation?.projectId);
+  const { data: meetings, complete, respond: respondToMeeting, error: meetingsError, isLoading: meetingsLoading, refetch: refetchMeetings } = useMeetings(simulation?.projectId);
   const [notesById, setNotesById] = useState({});
+  const [responsesById, setResponsesById] = useState({});
+  const [meetingActionError, setMeetingActionError] = useState("");
+  const meetingRequestKeys = useRef({});
 
   if (isLoading) return <LoadingScreen label="Loading timeline" />;
   if (error) return <div className="mx-auto max-w-5xl p-6"><div className="card p-5 text-sm text-status-blocked" role="alert">Timeline could not be loaded: {error.message}<button className="btn-ghost ml-3" onClick={() => refetch()}>Retry</button></div></div>;
@@ -35,7 +38,8 @@ export default function Timeline() {
         <p className="mt-1 text-sm text-text-muted">Every task, event, meeting, and message — one living record.</p>
       </motion.div>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-      {meetingsError && <p className="card text-sm text-status-blocked" role="alert">Meeting data could not be loaded: {meetingsError.message}</p>}
+      {meetingsError && <p className="card text-sm text-status-blocked" role="alert">Meeting data could not be loaded: {meetingsError.message}<button className="btn-ghost ml-3" onClick={() => refetchMeetings()}>Retry</button></p>}
+      {meetingActionError && <p className="card text-sm text-status-blocked" role="alert">{meetingActionError}</p>}
       <div className="lg:col-span-2">
         <div className="relative space-y-3 pl-6">
           <span className="timeline-rail absolute bottom-4 left-[9px] top-2 w-[2px] rounded-full" />
@@ -83,6 +87,7 @@ export default function Timeline() {
       <div>
         <h2 className="mb-3 font-display text-base font-bold">Upcoming <span className="gradient-text">meetings</span></h2>
         <div className="space-y-3">
+          {meetingsLoading && <p className="card text-sm text-text-faint" role="status">Loading meetings…</p>}
           {pendingMeetings.map((m, i) => (
             <motion.div
               key={m.id}
@@ -100,6 +105,38 @@ export default function Timeline() {
                 </span>
               </div>
               <p className="mt-2 text-sm font-medium leading-relaxed text-text">{m.agenda}</p>
+              {m.student_response && <p className="mt-2 rounded-lg border border-white/[0.06] p-2 text-xs text-text-muted">Your response: {m.student_response}</p>}
+              {m.scheduled_at && <p className="mt-1 text-[11px] text-text-faint">{new Date(m.scheduled_at).toLocaleString()}</p>}
+              {!m.completed && (
+                <form className="mt-3 space-y-2" onSubmit={(e) => {
+                  e.preventDefault();
+                  const response = (responsesById[m.id] || "").trim();
+                  if (!response) return;
+                  if (meetingRequestKeys.current[m.id]?.response !== response) {
+                    meetingRequestKeys.current[m.id] = { response, key: crypto.randomUUID() };
+                  }
+                  respondToMeeting.mutateAsync({
+                    meetingId: m.id,
+                    response,
+                    idempotency_key: meetingRequestKeys.current[m.id].key,
+                  }).then(() => {
+                    delete meetingRequestKeys.current[m.id];
+                    setMeetingActionError("");
+                    setResponsesById((current) => ({ ...current, [m.id]: "" }));
+                  }).catch((error) => setMeetingActionError(error.message || "Meeting response could not be saved."));
+                }}>
+                  <textarea
+                    className="input rounded-xl! text-xs"
+                    placeholder="Reply to the invitation or share your update..."
+                    rows={2}
+                    value={responsesById[m.id] || ""}
+                    onChange={(e) => setResponsesById((current) => ({ ...current, [m.id]: e.target.value }))}
+                  />
+                  <button className="btn-ghost w-full" type="submit" disabled={respondToMeeting.isPending || !responsesById[m.id]?.trim()}>
+                    {respondToMeeting.isPending ? "Sending…" : "Send response"}
+                  </button>
+                </form>
+              )}
               <textarea
                 className="input mt-3 rounded-xl! text-xs"
                 placeholder="Meeting notes..."
@@ -111,20 +148,20 @@ export default function Timeline() {
                 whileTap={{ scale: 0.97 }}
                 className="btn-ghost mt-2 w-full"
                 disabled={complete.isPending}
-                onClick={() =>
+                onClick={() => {
                   complete.mutateAsync({
                     meetingId: m.id,
                     notes: notesById[m.id] || "",
                     attendance: m.participants,
                     action_items: [],
-                  })
-                }
+                  }).then(() => setMeetingActionError("")).catch((error) => setMeetingActionError(error.message || "Meeting update could not be saved."));
+                }}
               >
                 {complete.isPending ? "Saving…" : "✓ Mark completed"}
               </motion.button>
             </motion.div>
           ))}
-          {pendingMeetings.length === 0 && (
+          {!meetingsLoading && !meetingsError && pendingMeetings.length === 0 && (
             <div className="card">
               <EmptyState compact icon="📅" title="Calendar clear" hint="No upcoming meetings. Enjoy the focus time." />
             </div>

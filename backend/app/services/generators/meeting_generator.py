@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import List
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.models.enums import MeetingType
 from app.models.manager import Manager
@@ -25,6 +26,20 @@ def generate_meetings_for_sprints(
 ) -> List[MeetingSchedule]:
     participants = [manager.name] + [t.name for t in team_members] + ["You"]
     meetings: List[MeetingSchedule] = []
+    existing = db.execute(select(MeetingSchedule).where(
+        MeetingSchedule.project_id == project_id,
+    )).scalars().all()
+    by_slot = {(meeting.meeting_type, meeting.scheduled_at): meeting for meeting in existing}
+
+    def add_once(meeting: MeetingSchedule) -> None:
+        key = (meeting.meeting_type, meeting.scheduled_at)
+        existing_meeting = by_slot.get(key)
+        if existing_meeting is not None:
+            meetings.append(existing_meeting)
+            return
+        db.add(meeting)
+        by_slot[key] = meeting
+        meetings.append(meeting)
 
     for sprint in sprints:
         # Sprint Planning at start
@@ -35,8 +50,7 @@ def generate_meetings_for_sprints(
             agenda=f"Plan scope and priorities for {sprint.name}.",
             participants=participants,
         )
-        db.add(planning)
-        meetings.append(planning)
+        add_once(planning)
 
         # Daily Standups for each day of the sprint
         if sprint.start_date and sprint.end_date:
@@ -52,8 +66,7 @@ def generate_meetings_for_sprints(
                         agenda=f"Daily standup for {sprint.name}. Quick sync: what did you do, what will you do, any blockers.",
                         participants=participants,
                     )
-                    db.add(standup)
-                    meetings.append(standup)
+                    add_once(standup)
                 current += timedelta(days=1)
 
         # Sprint Review at end
@@ -64,8 +77,7 @@ def generate_meetings_for_sprints(
             agenda=f"Review completed work and demo deliverables for {sprint.name}.",
             participants=participants,
         )
-        db.add(review)
-        meetings.append(review)
+        add_once(review)
 
         # Retrospective after review
         retrospective = MeetingSchedule(
@@ -75,8 +87,7 @@ def generate_meetings_for_sprints(
             agenda=f"Retrospective for {sprint.name}. What went well, what didn't, and how to improve.",
             participants=participants,
         )
-        db.add(retrospective)
-        meetings.append(retrospective)
+        add_once(retrospective)
 
     db.flush()
     return meetings

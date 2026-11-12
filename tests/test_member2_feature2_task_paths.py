@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import event as sqlalchemy_event, text
 
 os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://aiwse:aiwse_password@localhost:5432/aiwse_test_db")
 os.environ.setdefault("JWT_SECRET_KEY", "change-me-to-the-shared-signing-secret")
@@ -282,6 +282,43 @@ class TestPersonalisedTaskPathsAPI:
             assert simulation.current_task_id == task_ids[1]
             assert len(path) == 2
         finally:
+            db.close()
+
+    def test_next_available_task_lookup_has_bounded_query_count(self):
+        """Blocked path length must not add one prerequisite query per task."""
+        from app.models.task import TaskDependency
+        from app.services.simulation.task_access_service import get_next_available_path_entry
+
+        db = SessionLocal()
+        student_id = f"bounded_path_{uuid.uuid4().hex[:8]}"
+        statements = []
+
+        def count_statement(_conn, _cursor, statement, _parameters, _context, _many):
+            statements.append(statement)
+
+        try:
+            company_id = _seed_company(db, student_id)
+            project_id = _seed_project(db, company_id)
+            task_ids = _seed_sprints_and_tasks(db, project_id, num_sprints=1, tasks_per_sprint=12)
+            sim_id = _seed_simulation(db, student_id, company_id, project_id)
+            # Ten path tasks are blocked on an unfinished prerequisite excluded
+            # from this student's path; the final path task is available.
+            for task_id in task_ids[:10]:
+                db.add(TaskDependency(task_id=task_id, depends_on_task_id=task_ids[10]))
+            db.flush()
+            build_task_path(db, sim_id, project_id, task_ids=task_ids[:10] + [task_ids[11]])
+            db.commit()
+            db.expire_all()
+
+            sqlalchemy_event.listen(app_engine, "before_cursor_execute", count_statement)
+            entry = get_next_available_path_entry(db, sim_id)
+            assert entry is not None
+            assert entry.task_id == task_ids[11]
+            # One simulation lookup, two graph-validation selects, and one
+            # eligible-entry query, regardless of the ten blocked entries.
+            assert len(statements) <= 4, f"Expected bounded SQL queries, got {len(statements)}"
+        finally:
+            sqlalchemy_event.remove(app_engine, "before_cursor_execute", count_statement)
             db.close()
 
     def test_current_task_board_progress_and_simulation_apis_agree_after_refresh(self, client):

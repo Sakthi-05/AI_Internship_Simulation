@@ -1,11 +1,13 @@
 import uuid
+import time
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, status, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.database import get_db
 from app.core.security import CurrentUser, get_current_user
@@ -18,7 +20,7 @@ from app.models.project import Project
 from app.models.sprint import Sprint
 from app.models.simulation import Simulation, Scenario, ScenarioTask, WorkflowEvent
 from app.models.soft_skill import SoftSkillEvidence  # noqa: F401
-from app.models.task import Task
+from app.models.task import Task, TaskDependency
 from app.models.task_path import SimulationTaskPath
 from app.models.submission import Submission, SubmissionVersion
 from app.services.engines import trigger_workflow_event
@@ -32,7 +34,12 @@ from app.services.engines.simulation_task_state_machine import (
 from app.services.submission.submission_service import SubmissionService
 from app.services.file_storage import FileValidationError
 from app.services.activity_log_service import log_activity
-from app.services.ai.ai_service import AIService, get_ai_service
+from app.services.ai.ai_service import (
+    AIService,
+    AI_GENERATION_CONTEXT,
+    bind_ai_generation_context,
+    get_ai_service,
+)
 from app.services.criteria_version_service import criteria_identity, criteria_view
 from app.services.simulation.interaction_history_service import (
     list_interactions,
@@ -41,6 +48,20 @@ from app.services.simulation.interaction_history_service import (
 )
 
 router = APIRouter(prefix="/api/simulations", tags=["Simulations"])
+START_TASK_AI_TIMEOUT_SECONDS = 6.5
+logger = logging.getLogger(__name__)
+
+
+def _commit_read_repairs(db: Session) -> bool:
+    """Persist only actual repair writes on GET routes, skipping empty commits."""
+    changed = (
+        db.info.pop("simulation_read_repair_changed", False)
+        or bool(db.new or db.deleted)
+        or any(db.is_modified(item) for item in db.dirty)
+    )
+    if changed:
+        db.commit()
+    return changed
 
 
 class CreateSimulationRequest(BaseModel):
@@ -179,8 +200,7 @@ def get_simulation(
     if simulation.status == SimulationStatus.IN_PROGRESS:
         from app.services.simulation.task_access_service import repair_current_task
         repair_current_task(db, simulation)
-        db.commit()
-        db.refresh(simulation)
+        _commit_read_repairs(db)
     
     current_scenario = None
     if simulation.current_scenario_id:
@@ -194,15 +214,26 @@ def get_simulation(
     total_tasks = 0
     completed_tasks = 0
     
-    path_entries = db.execute(
-        select(SimulationTaskPath).where(SimulationTaskPath.simulation_id == simulation.id)
-    ).scalars().all()
-    
-    if path_entries:
-        total_tasks = len(path_entries)
-        completed_tasks = sum(1 for entry in path_entries if entry.task.status == TaskStatus.COMPLETED)
-    elif simulation.scenarios:
-        for scenario in simulation.scenarios:
+    path_counts = db.execute(
+        select(
+            func.count(SimulationTaskPath.id),
+            func.count(case((Task.status == TaskStatus.COMPLETED, 1))),
+        )
+        .select_from(SimulationTaskPath)
+        .join(Task, Task.id == SimulationTaskPath.task_id)
+        .where(SimulationTaskPath.simulation_id == simulation.id)
+    ).one()
+
+    if path_counts[0]:
+        total_tasks, completed_tasks = path_counts
+    else:
+        scenarios = db.execute(
+            select(Scenario)
+            .options(selectinload(Scenario.tasks).joinedload(ScenarioTask.task))
+            .where(Scenario.simulation_id == simulation.id)
+            .order_by(Scenario.sequence)
+        ).scalars().all()
+        for scenario in scenarios:
             for scenario_task in scenario.tasks:
                 total_tasks += 1
                 if scenario_task.task.status == TaskStatus.COMPLETED:
@@ -241,6 +272,8 @@ def get_simulation(
                 "formatted": "Expired",
                 "deadline_missed": True
             }
+
+    current_task_criteria = criteria_view(db, current_task) if current_task else None
     
     return {
         "simulation_id": str(simulation.id),
@@ -276,8 +309,8 @@ def get_simulation(
             "difficulty": current_task.difficulty.value if current_task.difficulty else simulation.difficulty.value,
             "task_type": current_task.task_type.value if current_task.task_type else "coding",
             "required_skills": simulation.project.technology_stack if simulation.project else [],
-            "expected_output": criteria_view(db, current_task)["expected_output"],
-            "criteria_version": criteria_view(db, current_task)["criteria_version"],
+            "expected_output": current_task_criteria["expected_output"],
+            "criteria_version": current_task_criteria["criteria_version"],
             "deadline": current_task.deadline.isoformat() if current_task.deadline else None,
             "status": current_task.status.value,
             "started_at": current_task.started_at.isoformat() if current_task.started_at else None,
@@ -314,6 +347,14 @@ async def start_simulation(
     Omit task_ids to enable dynamic task generation based on baseline/competency.
     """
     simulation = _get_owned_simulation(simulation_id, db, user)
+    # Serialize starts at the simulation row so simultaneous retries do not
+    # invoke the provider or create competing task-path entries.
+    simulation = db.execute(
+        select(Simulation)
+        .where(Simulation.id == simulation_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
 
     if simulation.status != SimulationStatus.NOT_STARTED:
         raise HTTPException(
@@ -364,12 +405,26 @@ async def start_simulation(
         
         if first_sprint:
             # Generate first dynamic task (previous_task=None indicates first task)
-            first_task = await generate_dynamic_task(
-                db=db,
-                simulation=simulation,
-                sprint=first_sprint,
-                student_id=user.student_id,
-                previous_task=None  # First task has no predecessor
+            generation_id = f"simulation-start:{simulation.id}:{first_sprint.id}"
+            generation_context_token = bind_ai_generation_context(generation_id, str(simulation.id))
+            provider_started = time.monotonic()
+            try:
+                first_task = await generate_dynamic_task(
+                    db=db,
+                    simulation=simulation,
+                    sprint=first_sprint,
+                    student_id=user.student_id,
+                    previous_task=None,
+                    provider_timeout_seconds=START_TASK_AI_TIMEOUT_SECONDS,
+                )
+            finally:
+                AI_GENERATION_CONTEXT.reset(generation_context_token)
+            generation_reason = (first_task.task_metadata or {}).get("generation_reason", "")
+            logger.info(
+                "Simulation start task ready generation_id=%s simulation_id=%s source=%s elapsed_ms=%d",
+                generation_id, simulation.id,
+                "deterministic_fallback" if "deterministic fallback" in generation_reason.lower() else "ai",
+                int((time.monotonic() - provider_started) * 1000),
             )
             first_task.status = TaskStatus.TODO
             db.add(first_task)
@@ -417,6 +472,19 @@ async def start_simulation(
         task_id=simulation.current_task_id,
         metadata={"title": simulation.title},
     )
+    if simulation.current_task_id:
+        from app.models.task import Task
+        from app.models.enums import NotificationType
+        from app.services.notification_service import notify
+        assigned_task = db.get(Task, simulation.current_task_id)
+        if assigned_task is not None:
+            notify(
+                db, simulation.company_id, NotificationType.TASK_ASSIGNED,
+                f"New task assigned: {assigned_task.title}",
+                simulation_id=simulation.id,
+                context={"task_id": str(assigned_task.id), "task_title": assigned_task.title},
+                dedupe_key=f"task-assigned:{simulation.id}:{assigned_task.id}",
+            )
     
     db.commit()
     db.refresh(simulation)
@@ -457,7 +525,9 @@ def get_simulation_progress(
     
     # Prefer task path (student-specific subset) when available
     path_entries = db.execute(
-        select(SimulationTaskPath).where(SimulationTaskPath.simulation_id == simulation.id)
+        select(SimulationTaskPath)
+        .options(joinedload(SimulationTaskPath.task).joinedload(Task.sprint))
+        .where(SimulationTaskPath.simulation_id == simulation.id)
     ).scalars().all()
     
     if path_entries:
@@ -475,7 +545,13 @@ def get_simulation_progress(
                 "completed": is_completed,
             })
     else:
-        for scenario in simulation.scenarios:
+        scenarios = db.execute(
+            select(Scenario)
+            .options(selectinload(Scenario.tasks).joinedload(ScenarioTask.task))
+            .where(Scenario.simulation_id == simulation.id)
+            .order_by(Scenario.sequence)
+        ).scalars().all()
+        for scenario in scenarios:
             scenario_total = 0
             scenario_completed = 0
             task_details = []
@@ -804,10 +880,10 @@ async def get_current_task(
         select(SimulationTaskPath.id).where(SimulationTaskPath.simulation_id == simulation.id)
     ).first() is not None
     task = repair_current_task(db, simulation)
+    _commit_read_repairs(db)
     if task:
         _sync_current_scenario_from_task(db, simulation, task)
-        db.commit()
-        db.refresh(simulation)
+        _commit_read_repairs(db)
     else:
         if has_task_path:
             remaining = db.execute(
@@ -826,22 +902,27 @@ async def get_current_task(
                     detail="No unlocked task is currently available for this simulation",
                 )
             if simulation.status == SimulationStatus.IN_PROGRESS:
-                simulation.status = SimulationStatus.COMPLETED
-                simulation.completed_at = datetime.now(timezone.utc)
-                simulation.progress = 100
-                simulation.current_task_id = None
-                db.add(simulation)
-                record_interaction(
-                    db,
-                    simulation,
-                    situation=simulation.title,
-                    student_response=None,
-                    decision="complete",
-                    interaction_type="simulation_completed",
-                    metadata={"source": "current_task_lookup"},
+                from app.services.simulation.progression_service import (
+                    _complete_simulation, _module2_completion_ready,
                 )
-                db.commit()
-                db.refresh(simulation)
+                if _module2_completion_ready(db, simulation):
+                    await _complete_simulation(db, simulation, user.student_id)
+                    record_interaction(
+                        db,
+                        simulation,
+                        situation=simulation.title,
+                        student_response=None,
+                        decision="complete",
+                        interaction_type="simulation_completed",
+                        metadata={"source": "current_task_lookup"},
+                    )
+                    db.commit()
+                    db.refresh(simulation)
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="No active task is available and completion requirements are not satisfied",
+                    )
         if not has_task_path:
             # Fallback preserves legacy scenario-only simulations without paths.
             from app.services.simulation.progression_service import get_next_task_for_simulation
@@ -936,6 +1017,16 @@ async def get_current_task(
             .limit(1)
         ).scalars().first()
 
+    task_dependencies = [
+        {"task_id": str(dependency_id), "title": title}
+        for dependency_id, title in db.execute(
+            select(TaskDependency.depends_on_task_id, Task.title)
+            .outerjoin(Task, Task.id == TaskDependency.depends_on_task_id)
+            .where(TaskDependency.task_id == task.id)
+        ).all()
+    ]
+    task_criteria = criteria_view(db, task)
+
     return {
         "task_id": str(task.id),
         "simulation_id": str(simulation.id),
@@ -947,8 +1038,13 @@ async def get_current_task(
         "difficulty": task.difficulty.value if task.difficulty else (current_scenario.difficulty.value if current_scenario else "intermediate"),
         "task_type": task.task_type.value if task.task_type else "coding",
         "required_skills": current_scenario.required_skills if current_scenario else [],
-        "expected_output": criteria_view(db, task)["expected_output"],
-        "criteria_version": criteria_view(db, task)["criteria_version"],
+        "expected_output": task_criteria["expected_output"],
+        "acceptance_criteria": task_criteria["acceptance_criteria"],
+        "objectives": (task.task_metadata or {}).get("objectives", []),
+        "deliverables": (task.task_metadata or {}).get("deliverables", []),
+        "technology_context": (task.task_metadata or {}).get("technology_context", []),
+        "dependencies": task_dependencies,
+        "criteria_version": task_criteria["criteria_version"],
         "deadline": task.deadline.isoformat() if task.deadline else None,
         "status": task.status.value,
         "started_at": task.started_at.isoformat() if task.started_at else None,
@@ -1329,11 +1425,8 @@ async def submit_simulation_task(
 
     db.flush()
     
-    # Collect workflow events encountered during this task
-    from app.services.workplace_scenarios import assess_requirement_changes_for_submission
-    requirement_change_assessments = assess_requirement_changes_for_submission(
-        db, simulation, task, user.student_id
-    )
+    # Collect workflow events encountered during this task. Module 2 records
+    # evidence only; Module 3 owns evaluation and scoring.
     from app.services.engines import get_task_workflow_events
     workflow_events = await get_task_workflow_events(db, simulation_id, task_id)
     
@@ -1403,8 +1496,16 @@ async def submit_simulation_task(
         metadata={
             "submission_id": result.get("submission_id"),
             "version_id": result.get("version_id"),
+            "acceptance_criteria_version": criteria_identity(db, task),
             "on_time": on_time,
         },
+    )
+    from app.services.workplace_scenarios import record_task_submission_action
+    record_task_submission_action(
+        db, simulation, task, user.student_id,
+        student_response or "Task artifact submitted.",
+        submission_id=str(result.get("submission_id")) if result.get("submission_id") else None,
+        version_id=str(result.get("version_id")) if result.get("version_id") else None,
     )
     
     # Trigger SUBMISSION_CREATED event
@@ -1506,7 +1607,10 @@ async def submit_simulation_task(
         "time_taken_minutes": time_taken_minutes,
         "on_time": on_time,
         "deadline_missed": deadline_missed,
-        "requirement_change_assessments": requirement_change_assessments,
+        # Retain the response field for existing clients. Module 2 no longer
+        # evaluates or scores communication/adaptability; event evidence is
+        # available from the workflow event and interaction history APIs.
+        "requirement_change_assessments": [],
         "progress": simulation.progress,
         "current_scenario": {
             "id": str(current_scenario.id),
@@ -1550,11 +1654,27 @@ async def acknowledge_simulation_event(
     """Student confirms they saw a requirement change. The manager then writes."""
     simulation = _get_owned_simulation(simulation_id, db, user)
     task, event = _owned_workflow_event(db, simulation, task_id, event_id)
+    was_pending = event.status.value == "pending" if hasattr(event.status, "value") else event.status == "pending"
     from app.services.workplace_scenarios import WorkplaceScenarioError, acknowledge_requirement_change
     try:
         payload = acknowledge_requirement_change(db, simulation, task, event, user.student_id)
     except WorkplaceScenarioError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if was_pending:
+        record_interaction(
+        db, simulation,
+        situation=event.message or event.title,
+        student_response="Acknowledged the requirement change.",
+        decision="acknowledge_requirement_change",
+        interaction_type="event_acknowledged",
+        scenario_id=event.scenario_id,
+        task_id=task.id,
+        metadata={
+            "event_id": str(event.id),
+            "criteria_version_id": (event.metadata_json or {}).get("criteria_version_id"),
+            "criteria_version_number": (event.metadata_json or {}).get("criteria_version_number"),
+        },
+        )
     db.commit()
     return payload
 
@@ -1583,6 +1703,21 @@ async def record_simulation_event_action(
         )
     except WorkplaceScenarioError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    record_interaction(
+        db, simulation,
+        situation=event.updated_requirement or event.message or event.title,
+        student_response=payload.detail,
+        decision="record_adapted_work",
+        interaction_type="workplace_decision",
+        scenario_id=event.scenario_id,
+        task_id=task.id,
+        metadata={
+            "event_id": str(event.id),
+            "action": payload.action,
+            "criteria_version_id": (event.metadata_json or {}).get("criteria_version_id"),
+            "criteria_version_number": (event.metadata_json or {}).get("criteria_version_number"),
+        },
+    )
     db.commit()
     return result
 
@@ -1610,7 +1745,6 @@ async def respond_to_simulation_event(
     
     if event.task_id != task_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Event does not belong to this task")
-
     if event.event_type == WorkflowEventType.REQUIREMENT_CHANGE:
         task = db.get(Task, task_id)
         from app.services.workplace_scenarios import WorkplaceScenarioError, record_requirement_reply
@@ -1691,7 +1825,13 @@ async def respond_to_simulation_event(
             interaction_type="requirement_change_reply",
             scenario_id=event.scenario_id,
             task_id=task.id,
-            metadata={"event_id": str(event.id), "event_type": "requirement_change"},
+            metadata={
+                "event_id": str(event.id),
+                "event_type": "requirement_change",
+                "student_message_id": (event.metadata_json or {}).get("student_message_id"),
+                "criteria_version_id": (event.metadata_json or {}).get("criteria_version_id"),
+                "criteria_version_number": (event.metadata_json or {}).get("criteria_version_number"),
+            },
         )
         db.commit()
         from app.websockets.manager import manager as ws_manager
@@ -1705,6 +1845,17 @@ async def respond_to_simulation_event(
                 })
         await ws_manager.broadcast(str(simulation.company_id), "event", {"event_id": str(event.id)})
         return result
+
+    if event.response:
+        if event.response == response:
+            return {
+                "event_id": str(event.id),
+                "status": event.status.value if hasattr(event.status, "value") else event.status,
+                "response": event.response,
+                "responded_at": event.responded_at.isoformat() if event.responded_at else None,
+                "message": "Response already recorded",
+            }
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A response is already recorded for this event")
     
     # Record response
     from app.services.engines import respond_to_workflow_event
@@ -1721,6 +1872,7 @@ async def respond_to_simulation_event(
         metadata={
             "event_id": str(updated_event.id),
             "event_type": updated_event.event_type.value,
+            "scenario_key": (updated_event.metadata_json or {}).get("scenario_key"),
         },
     )
     
@@ -1773,11 +1925,16 @@ def get_task_events(
     ).scalars().all()
     task = db.get(Task, task_id)
     from app.services.workplace_scenarios import serialize_workflow_event
+    from app.services.criteria_version_service import required_texts
+    acceptance_criteria = required_texts(db, task) if task is not None else []
 
     return {
         "task_id": str(task_id),
         "simulation_id": str(simulation_id),
-        "events": [serialize_workflow_event(db, event, task) for event in events],
+        "events": [
+            serialize_workflow_event(db, event, task, acceptance_criteria=acceptance_criteria)
+            for event in events
+        ],
     }
 
 

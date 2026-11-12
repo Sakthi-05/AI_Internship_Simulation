@@ -22,7 +22,7 @@ from app.models.meeting import MeetingSchedule
 from app.models.project import Project
 from app.models.sprint import Sprint
 from app.models.task import Task
-from app.models.simulation import Simulation
+from app.models.simulation import Simulation, WorkflowEvent
 from app.models.simulation_interaction import SimulationInteraction
 from app.schemas.misc import TimelineEntry
 
@@ -81,6 +81,18 @@ def get_timeline(
         )
     ).scalars().all()
     for simulation in simulations:
+        workplace_events = db.execute(
+            select(WorkflowEvent)
+            .where(WorkflowEvent.simulation_id == simulation.id)
+            .order_by(WorkflowEvent.occurred_at, WorkflowEvent.id)
+        ).scalars().all()
+        for event in workplace_events:
+            entries.append(TimelineEntry(
+                kind="workplace_event",
+                title=event.title,
+                detail=event.message,
+                timestamp=event.occurred_at,
+            ))
         interactions = db.execute(
             select(SimulationInteraction)
             .where(SimulationInteraction.simulation_id == simulation.id)
@@ -89,18 +101,32 @@ def get_timeline(
         for interaction in interactions:
             meta = interaction.metadata_json or {}
             event_type = interaction.interaction_type
-            if event_type not in {"task_submitted", "task_evaluated", "adaptive_decision"}:
+            if event_type not in {
+                "task_submitted", "task_evaluated", "adaptive_decision",
+                "event_responded", "event_acknowledged", "requirement_change_reply",
+                "workplace_decision", "blocker_reported", "bug_reported",
+                "meeting_response", "meeting_completed",
+            }:
                 continue
             title = {
                 "task_submitted": "Task submission",
                 "task_evaluated": "Technical evaluation",
                 "adaptive_decision": "Difficulty adaptation",
-            }[event_type]
+                "event_responded": "Workplace event response",
+                "event_acknowledged": "Requirement change acknowledged",
+                "requirement_change_reply": "Requirement change response",
+                "workplace_decision": "Workplace decision",
+                "blocker_reported": "Blocker reported",
+                "bug_reported": "Bug reported",
+                "meeting_response": "Meeting response",
+                "meeting_completed": "Meeting completed",
+            }.get(event_type, event_type.replace("_", " ").title())
             adaptation = meta.get("adaptive_decision") or {}
             detail = (
                 adaptation.get("reason")
                 or meta.get("summary")
                 or meta.get("task_title")
+                or interaction.student_response
                 or interaction.decision
             )
             entries.append(TimelineEntry(

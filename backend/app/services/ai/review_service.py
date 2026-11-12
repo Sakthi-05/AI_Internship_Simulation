@@ -674,81 +674,28 @@ class ReviewService:
                 {"task_id": str(task.id), "review_id": str(ai_review.id), "result": ai_review.result.value},
             )
 
-        # Generate a contextual follow-up only when this task has no saved
-        # successor. The review service may be retried, so the predecessor
-        # marker is the idempotency key. Current-task ownership remains with
-        # progression_service, which consumes this ordered path entry.
+        # Preserve the adaptation agent recommendation with the approved review.
+        # Progression consumes it only after manager approval and creates work in
+        # the next sequential sprint; technical review alone cannot advance work.
         if ai_review.result == ReviewResult.APPROVED and simulation is not None:
-            from app.models.task_path import SimulationTaskPath
-            from app.models.sprint import Sprint
-            from app.services.generators.dynamic_task_generator import generate_dynamic_task
-            from app.services.simulation.progression_service import calculate_sprint_progress, _activate_sprint
-
-            db.execute(
-                select(Simulation).where(Simulation.id == simulation.id).with_for_update()
-            ).scalar_one()
-            prior_generated = db.execute(
-                select(SimulationTaskPath.id)
-                .join(Task, Task.id == SimulationTaskPath.task_id)
-                .where(
-                    SimulationTaskPath.simulation_id == simulation.id,
-                    Task.task_metadata["previous_task_id"].as_string() == str(task.id),
+            try:
+                competency_focus, recorded_focus = await self._competency_task_focus(
+                    db, simulation=simulation, task=task, review=ai_review,
+                    adaptation=adaptation,
                 )
-            ).first()
-            unfinished_successor = db.execute(
-                select(SimulationTaskPath.id)
-                .join(Task, Task.id == SimulationTaskPath.task_id)
-                .where(
-                    SimulationTaskPath.simulation_id == simulation.id,
-                    Task.id != task.id,
-                    Task.status != TaskStatus.COMPLETED,
+                if recorded_focus is not None:
+                    adaptation["competency_adaptation"] = recorded_focus
+                ai_review.raw_payload = {
+                    **(ai_review.raw_payload or {}),
+                    "adaptive_decision": adaptation,
+                    "competency_task_focus": competency_focus,
+                }
+                db.add(ai_review)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist competency task focus review_id=%s task_id=%s: %s",
+                    ai_review.id, task.id, exc, exc_info=True,
                 )
-            ).first()
-            current_sprint = db.get(Sprint, task.sprint_id)
-            if not prior_generated and not unfinished_successor and current_sprint:
-                sprint_progress = calculate_sprint_progress(db, simulation, current_sprint.id)
-                target_sprint = current_sprint
-                if sprint_progress["objective_complete"]:
-                    target_sprint = db.execute(
-                        select(Sprint)
-                        .where(
-                            Sprint.project_id == current_sprint.project_id,
-                            Sprint.sprint_number > current_sprint.sprint_number,
-                        )
-                        .order_by(Sprint.sprint_number.asc())
-                    ).scalars().first()
-                    if target_sprint:
-                        _activate_sprint(db, target_sprint.id)
-                if target_sprint:
-                    try:
-                        competency_focus, recorded_focus = await self._competency_task_focus(
-                            db, simulation=simulation, task=task, review=ai_review,
-                            adaptation=adaptation,
-                        )
-                        if recorded_focus is not None:
-                            adaptation["competency_adaptation"] = recorded_focus
-                        next_task = await generate_dynamic_task(
-                            db, simulation, target_sprint, version.submission.student_id, task,
-                            competency_focus=competency_focus,
-                        )
-                        max_seq = db.execute(
-                            select(SimulationTaskPath.sequence)
-                            .where(SimulationTaskPath.simulation_id == simulation.id)
-                            .order_by(SimulationTaskPath.sequence.desc())
-                        ).scalars().first() or 0
-                        db.add(SimulationTaskPath(
-                            simulation_id=simulation.id,
-                            task_id=next_task.id,
-                            sequence=max_seq + 1,
-                            status=TaskStatus.BACKLOG,
-                        ))
-                        db.flush()
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to generate follow-up task review_id=%s task_id=%s: %s",
-                            ai_review.id, task.id, exc, exc_info=True,
-                        )
-
         db.commit()
         logger.info(
             "Technical review persisted review_id=%s version_id=%s status=%s evaluation_source=%s",

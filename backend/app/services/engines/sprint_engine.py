@@ -13,7 +13,12 @@ from app.models.enums import SprintStatus
 from app.models.project import Project
 from app.models.sprint import Sprint
 
-_SPRINT_NAMES = ["Foundation & Setup", "Core Feature Build", "Integration & Hardening", "Polish & Launch"]
+SPRINT_NAMES = (
+    "Sprint 1: Foundation and Onboarding",
+    "Sprint 2: Core Implementation",
+    "Sprint 3: Advanced Implementation and Workplace Challenges",
+    "Sprint 4: Integration and Project Completion",
+)
 
 
 def _chunk_modules(modules: List[str], n: int) -> List[List[str]]:
@@ -45,7 +50,7 @@ def generate_sprints_and_tasks(db: Session, project: Project) -> List[Sprint]:
         sprint = Sprint(
             project_id=project.id,
             sprint_number=i + 1,
-            name=f"Sprint {i + 1}: {_SPRINT_NAMES[i]}",
+            name=SPRINT_NAMES[i],
             goal=(
                 f"Deliver {', '.join(module_chunks[i]) or 'planning & housekeeping tasks'} "
                 f"for {project.title}."

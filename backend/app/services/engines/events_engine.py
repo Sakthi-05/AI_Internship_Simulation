@@ -1,5 +1,4 @@
-"""
-FEATURE 9: Dynamic Events Engine.
+"""FEATURE 9: Dynamic Events Engine.
 
 A single entry point (`trigger_event`) that any part of the system calls
 to raise a real event: it persists the Event row, creates a Notification,
@@ -8,8 +7,13 @@ anyone watching that company. Callers decide *when* to call this based on
 real project state (see workflow_engine.py) — this module never invents
 events on its own.
 """
+import hashlib
+
+from sqlalchemy import select
+
 from app.models.enums import EventType, NotificationType
 from app.models.event import Event
+from app.models.simulation import Simulation
 from app.services.activity_log_service import log_activity
 from app.services.notification_service import notify
 from app.websockets.manager import manager as ws_manager
@@ -36,7 +40,25 @@ async def trigger_event(db, project, event_type: EventType, description: str, pa
     db.flush()
 
     notification_type = _EVENT_NOTIFICATION_TYPE.get(event_type, NotificationType.REQUIREMENT_CHANGED)
-    notify(db, project.company_id, notification_type, description)
+    simulation_id = db.execute(
+        select(Simulation.id)
+        .where(Simulation.project_id == project.id)
+        .order_by(Simulation.created_at.desc()).limit(1)
+    ).scalar_one_or_none()
+    if event_type == EventType.BUG_REPORT:
+        identity = payload.get("bug_id")
+    else:
+        identity = next((payload.get(key) for key in (
+        "event_id", "version_id", "submission_id", "sprint_id", "review_id", "task_id"
+        ) if payload.get(key)), None)
+    fingerprint = identity or hashlib.sha256(description.encode("utf-8")).hexdigest()[:18]
+    dedupe_key = f"project-event:{project.id}:{notification_type.value}:{fingerprint}"
+    notify(
+        db, project.company_id, notification_type, description,
+        simulation_id=simulation_id,
+        context={"event_type": event_type.value, "project_id": str(project.id), **payload},
+        dedupe_key=dedupe_key,
+    )
     log_activity(db, project.company_id, actor="system", action=f"event:{event_type.value}", detail=description)
 
     await ws_manager.broadcast(

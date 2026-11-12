@@ -52,7 +52,7 @@ export default function SimulationWorkspace() {
   const generateSimulation = useGenerateSimulation();
   
   // Events
-  const { data: eventsData } = useTaskEvents(
+  const { data: eventsData, isLoading: eventsLoading, error: eventsError, refetch: refetchEvents } = useTaskEvents(
     simulationId,
     currentTaskData?.task_id
   );
@@ -64,6 +64,7 @@ export default function SimulationWorkspace() {
   const [showSubmissionModal, setShowSubmissionModal] = useState(false);
   const [actionError, setActionError] = useState("");
   const [simulationCompleted, setSimulationCompleted] = useState(false);
+  const [startPending, setStartPending] = useState(false);
 
   // Check if simulation is completed
   useEffect(() => {
@@ -79,6 +80,8 @@ export default function SimulationWorkspace() {
       setActionError("No simulation is available to start. Create an internship first.");
       return;
     }
+    if (startPending) return;
+    setStartPending(true);
     setActionError("");
     try {
       await apiClient.post(`/api/simulations/${idToUse}/start`);
@@ -93,7 +96,29 @@ export default function SimulationWorkspace() {
       // Navigate to the simulation workspace to show the current task
       navigate("/simulation");
     } catch (error) {
-      setActionError(error.message || "The simulation could not be started. Retry when the service is available.");
+      // A browser timeout does not cancel the server transaction. Re-read the
+      // persisted simulation before telling the student that startup failed.
+      if (/timeout|network/i.test(error?.message || "")) {
+        try {
+          const recovered = (await apiClient.get(`/api/simulations/${idToUse}`)).data;
+          if (recovered?.status === "in_progress" && recovered?.current_task_id) {
+            setSimulation(prev => ({ ...prev, id: idToUse, status: recovered.status }));
+            await invalidateWorkspaceQueries(queryClient);
+            queryClient.invalidateQueries({ queryKey: ["simulation", idToUse] });
+            queryClient.invalidateQueries({ queryKey: ["currentTask", idToUse] });
+            navigate("/simulation");
+            return;
+          }
+        } catch {
+          // Keep the recovery message actionable when the status endpoint is
+          // also temporarily unavailable; reopening the page retries recovery.
+        }
+        setActionError("Startup may still be processing. Reopen or retry shortly; the server will reuse any task it already generated.");
+      } else {
+        setActionError(error.message || "The simulation could not be started. Retry when the service is available.");
+      }
+    } finally {
+      setStartPending(false);
     }
   };
 
@@ -238,8 +263,11 @@ export default function SimulationWorkspace() {
   const handleEventResponse = async (eventId, response) => {
     try {
       await respondToEvent.mutateAsync({ eventId, response });
+      setActionError("");
+      return true;
     } catch (error) {
       setActionError(error.message || "The reply could not be saved.");
+      return false;
     }
   };
 
@@ -254,14 +282,17 @@ export default function SimulationWorkspace() {
   const handleWorkplaceAction = async (eventId, detail) => {
     try {
       await recordWorkplaceAction.mutateAsync({ eventId, detail });
+      setActionError("");
+      return true;
     } catch (error) {
       setActionError(error.message || "The adaptation could not be saved.");
+      return false;
     }
   };
 
   // If no simulation selected, show selection screen
   if (!simulationId) {
-    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} />;
+    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} starting={startPending} />;
   }
 
   // Show loading while fetching
@@ -317,7 +348,7 @@ export default function SimulationWorkspace() {
 
   // Simulation not yet started — show the start screen
   if (sim?.status === "not_started") {
-    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} />;
+    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} starting={startPending} />;
   }
 
   // No active task — determine the correct state from backend data
@@ -478,6 +509,9 @@ export default function SimulationWorkspace() {
           </div>
           <WorkplaceSimulation
             events={events}
+            isLoading={eventsLoading}
+            error={eventsError}
+            onRetry={() => refetchEvents()}
             onAcknowledge={handleAcknowledgeEvent}
             onReply={handleEventResponse}
             onRecordAction={handleWorkplaceAction}
@@ -497,7 +531,7 @@ export default function SimulationWorkspace() {
 /**
  * Simulation selection/start screen
  */
-function SimulationSelectionScreen({ onStartSimulation, error }) {
+function SimulationSelectionScreen({ onStartSimulation, error, starting = false }) {
   const { simulation, setSimulation } = useSimulation();
   const { auth } = useAuth();
   const createSimulation = useCreateSimulation();
@@ -586,10 +620,13 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
               whileTap={{ scale: 0.985 }}
               className="btn-primary w-full py-3.5 text-sm"
               onClick={() => onStartSimulation(simulation.id)}
-              disabled={simulation.status !== "not_started"}
+              disabled={simulation.status !== "not_started" || starting}
             >
-              ▶ Start Internship Simulation
+              {starting ? "Preparing your first task…" : "▶ Start Internship Simulation"}
             </motion.button>
+            {simulation.generationSource === "deterministic_fallback" && (
+              <p className="mt-3 text-xs text-text-faint">Gemini was unavailable, so your internship was prepared with the built-in deterministic generator.</p>
+            )}
             <div className="mt-4 flex items-center justify-center gap-4 text-[11px] text-text-faint">
               <span>⚡ Live AI manager</span><span>👥 AI teammates</span><span>📊 Real-time analytics</span>
             </div>

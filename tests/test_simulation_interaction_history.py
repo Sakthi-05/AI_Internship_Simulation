@@ -79,6 +79,58 @@ def _seed(db, student_id):
     return sim_id, tid
 
 
+def test_workplace_event_response_is_saved_once_in_simulation_history(client):
+    from app.models.enums import WorkflowEventType
+    from app.models.simulation import WorkflowEvent
+
+    student_id = f"event_history_{uuid.uuid4().hex[:8]}"
+    db = SessionLocal()
+    try:
+        sim_id, task_id = _seed(db, student_id)
+        event = WorkflowEvent(
+            simulation_id=sim_id,
+            task_id=task_id,
+            event_type=WorkflowEventType.STAKEHOLDER_MESSAGE,
+            title="Urgent stakeholder request",
+            message="Please confirm the deployment decision.",
+            trigger_condition="urgent_request",
+            action_required=True,
+            metadata_json={"scenario_key": "urgent_request", "request_id": "release-1"},
+        )
+        db.add(event)
+        db.commit()
+        event_id = event.id
+    finally:
+        db.close()
+
+    headers = _headers(student_id)
+    response = client.post(
+        f"/api/simulations/{sim_id}/tasks/{task_id}/events/{event_id}/respond",
+        headers=headers,
+        data={"response": "I will hold deployment until the blocking test passes."},
+    )
+    assert response.status_code == 200, response.text
+    retry = client.post(
+        f"/api/simulations/{sim_id}/tasks/{task_id}/events/{event_id}/respond",
+        headers=headers,
+        data={"response": "I will hold deployment until the blocking test passes."},
+    )
+    assert retry.status_code == 200, retry.text
+
+    event_feed = client.get(
+        f"/api/simulations/{sim_id}/tasks/{task_id}/events", headers=headers,
+    ).json()["events"]
+    assert event_feed[0]["scenario_key"] == "urgent_request"
+    assert event_feed[0]["metadata"]["request_id"] == "release-1"
+    assert event_feed[0]["response"].startswith("I will hold deployment")
+
+    history = client.get(f"/api/simulations/{sim_id}/interactions", headers=headers).json()
+    responses = [row for row in history["interactions"] if row["interaction_type"] == "event_responded"]
+    assert len(responses) == 1
+    assert responses[0]["student_response"] == event_feed[0]["response"]
+    assert responses[0]["metadata"]["event_id"] == str(event_id)
+
+
 class TestSimulationInteractionHistory:
     def test_start_records_chronological_interactions(self, client):
         student_id = f"ih_{uuid.uuid4().hex[:8]}"

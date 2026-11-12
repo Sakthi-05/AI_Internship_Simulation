@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -8,6 +9,7 @@ from app.models.enums import MessageSenderType
 
 class ChatMessageCreate(BaseModel):
     content: str = Field(..., min_length=1)
+    idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=120)
 
 
 class MessageRead(BaseModel):
@@ -15,6 +17,7 @@ class MessageRead(BaseModel):
 
     id: uuid.UUID
     company_id: uuid.UUID
+    simulation_id: uuid.UUID | None = None
     sender_type: MessageSenderType
     sender_id: str
     content: str

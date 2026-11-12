@@ -15,14 +15,14 @@ import { useSimulation as useSimulationQuery } from "../hooks/useSimulationApi";
 
 export default function Dashboard() {
   const { simulation } = useSimulation();
-  const { data: simulationState } = useSimulationQuery(simulation?.id);
+  const { data: simulationState, error: simulationError, refetch: refetchSimulation } = useSimulationQuery(simulation?.id);
   const { data: company, isLoading: companyLoading } = useCompany(simulation?.companyId);
   const { data: manager } = useManager(simulation?.companyId);
   const { data: project, isLoading: projectLoading } = useProject(simulation?.projectId);
-  const { data: state } = useProjectState(simulation?.projectId);
-  const { data: sprints } = useSprints(simulation?.projectId);
+  const { data: state, error: stateError, refetch: refetchState } = useProjectState(simulation?.projectId);
+  const { data: sprints, isLoading: sprintsLoading, error: sprintsError, refetch: refetchSprints } = useSprints(simulation?.projectId);
   const { data: board, isLoading: boardLoading, error: boardError, refetch: refetchBoard } = useBoard(simulation?.projectId, simulation?.id);
-  const { data: timeline } = useTimeline(simulation?.projectId);
+  const { data: timeline, isLoading: timelineLoading, error: timelineError, refetch: refetchTimeline } = useTimeline(simulation?.projectId);
 
   if (companyLoading || projectLoading || !company || !project) {
     if (companyLoading || projectLoading) return <LoadingScreen label="Loading dashboard" />;
@@ -36,7 +36,7 @@ export default function Dashboard() {
   const completedTasks = board?.completed?.length || 0;
   const completionPct = totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
-  const chartColors = { backlog: "#94A3B8", todo: "#2563EB", in_progress: "#D97706", submitted: "#8B5CF6", under_review: "#6366F1", blocked: "#F97373", completed: "#0D9488" };
+  const chartColors = { backlog: "#94A3B8", todo: "#2563EB", in_progress: "#D97706", submitted: "#8B5CF6", under_review: "#6366F1", changes_requested: "#D97706", manager_approval: "#0D9488", blocked: "#F97373", completed: "#0D9488" };
   const distributionData = STATUS_ORDER.map((s) => ({
     name: STATUS_META[s].label,
     value: board?.[s]?.length || 0,
@@ -79,7 +79,7 @@ export default function Dashboard() {
               {company.size && <><span className="text-text-faint">·</span><span>{company.size}</span></>}
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span className="chip chip-glow">{project.role}</span>
+              <span className="chip chip-glow">{simulationState?.role || project.role}</span>
               <span className="chip capitalize">{simulationState?.difficulty || project.difficulty} track</span>
             </div>
             {(company.technology_stack || []).length > 0 && (
@@ -110,6 +110,13 @@ export default function Dashboard() {
           </div>
         </div>
       </motion.div>
+
+      {(simulationError || stateError || sprintsError || timelineError) && (
+        <div className="rounded-xl border border-status-blocked/30 bg-status-blocked/5 px-4 py-3 text-sm text-status-blocked" role="alert">
+          Some dashboard data could not be refreshed: {[simulationError, stateError, sprintsError, timelineError].filter(Boolean).map((error) => error.message).join(" · ")}
+          <button className="btn-ghost ml-3" onClick={() => Promise.all([refetchSimulation(), refetchState(), refetchSprints(), refetchTimeline()])}>Retry dashboard data</button>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard index={0} icon="target" label="Completion" value={`${completionPct}%`} accent="#0D9488" hint="Tasks completed" />
@@ -221,7 +228,7 @@ export default function Dashboard() {
 
         <section className="card p-5">
           <div className="mb-4"><p className="eyebrow">Latest updates</p><h2 className="mt-1 font-display text-base font-semibold">Activity timeline</h2><p className="mt-1 text-xs text-text-faint">Recent events from your internship workspace.</p></div>
-          {recentActivity.length ? <div className="dashboard-activity-list">{recentActivity.map((event, index) => <article className="dashboard-activity-row" key={`${event.kind}-${event.timestamp}-${index}`}><span className={`activity-marker activity-marker-${index % 4}`}><span/></span><div className="min-w-0 flex-1"><h3 className="truncate text-xs font-semibold">{event.title}</h3>{event.detail && <p className="mt-1 line-clamp-1 text-[11px] text-text-faint">{event.detail}</p>}<time className="mt-1 block text-[10px] text-text-faint">{event.timestamp ? new Date(event.timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}</time></div></article>)}</div> : <p className="rounded-lg bg-surface-3 px-4 py-6 text-center text-sm text-text-muted">Activity will appear here as you work through the simulation.</p>}
+          {timelineLoading ? <p className="rounded-lg bg-surface-3 px-4 py-6 text-center text-sm text-text-faint">Loading recent activity…</p> : recentActivity.length ? <div className="dashboard-activity-list">{recentActivity.map((event, index) => <article className="dashboard-activity-row" key={`${event.kind}-${event.timestamp}-${index}`}><span className={`activity-marker activity-marker-${index % 4}`}><span/></span><div className="min-w-0 flex-1"><h3 className="truncate text-xs font-semibold">{event.title}</h3>{event.detail && <p className="mt-1 line-clamp-1 text-[11px] text-text-faint">{event.detail}</p>}<time className="mt-1 block text-[10px] text-text-faint">{event.timestamp ? new Date(event.timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}</time></div></article>)}</div> : <p className="rounded-lg bg-surface-3 px-4 py-6 text-center text-sm text-text-muted">Activity will appear here as you work through the simulation.</p>}
         </section>
       </div>
 
@@ -275,7 +282,7 @@ export default function Dashboard() {
           className="card p-5"
         >
           <h2 className="eyebrow">Sprint roadmap</h2>
-          {(sprints || []).length === 0 && <p className="mt-3 text-sm text-text-faint">No sprints have been planned.</p>}
+          {sprintsLoading ? <p className="mt-3 text-sm text-text-faint">Loading sprint roadmap…</p> : (sprints || []).length === 0 && <p className="mt-3 text-sm text-text-faint">No sprints have been planned.</p>}
           <ul className="relative mt-4 space-y-4 text-sm">
             <span className="timeline-rail absolute bottom-2 left-[7px] top-2 w-[2px] rounded-full opacity-60" />
             {(sprints || []).map((sprint, i) => {

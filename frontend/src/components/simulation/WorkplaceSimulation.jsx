@@ -2,13 +2,15 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   activeRequirementChange,
-  observationLabel,
   popupRequired,
   workplacePhase,
 } from "./workplaceScenario";
 
 export default function WorkplaceSimulation({
   events,
+  isLoading = false,
+  error,
+  onRetry,
   onAcknowledge,
   onReply,
   onRecordAction,
@@ -18,6 +20,7 @@ export default function WorkplaceSimulation({
 }) {
   const [reply, setReply] = useState("");
   const [adaptation, setAdaptation] = useState("");
+  const [eventResponses, setEventResponses] = useState({});
   const change = activeRequirementChange(events);
   const phase = workplacePhase(change);
   const otherEvents = (events || []).filter((event) => event.id !== change?.id);
@@ -29,9 +32,11 @@ export default function WorkplaceSimulation({
         <h3 className="mt-1 font-display text-sm font-bold">Manager updates</h3>
       </div>
       <div className="space-y-3 p-4">
-        {!change && (
+        {isLoading && <p className="text-xs text-text-faint" role="status">Loading workplace events…</p>}
+        {error && <div className="rounded-lg border border-status-blocked/30 p-3 text-xs text-status-blocked" role="alert">Workplace events could not be loaded: {error.message}<button className="btn-ghost mt-2 w-full" onClick={onRetry}>Retry</button></div>}
+        {!change && !isLoading && !error && (
           <p className="text-sm text-text-muted">
-            Requirement changes appear here after you tell your manager how the work is going. Communication and adaptability are assessed from what you write and what you do next.
+            Workplace events and your responses are saved to simulation history for later review.
           </p>
         )}
         {change && phase !== "acknowledge" && (
@@ -75,11 +80,10 @@ export default function WorkplaceSimulation({
         {phase === "reply" && (
           <form
             className="space-y-2"
-            onSubmit={(event) => {
+            onSubmit={async (event) => {
               event.preventDefault();
               if (!reply.trim()) return;
-              onReply(change.id, reply.trim());
-              setReply("");
+              if (await onReply(change.id, reply.trim())) setReply("");
             }}
           >
             <label className="block text-sm text-text-muted" htmlFor="requirement-reply">Reply to your manager</label>
@@ -99,11 +103,10 @@ export default function WorkplaceSimulation({
         {phase === "adapt" && (
           <form
             className="space-y-2"
-            onSubmit={(event) => {
+          onSubmit={async (event) => {
               event.preventDefault();
               if (!adaptation.trim()) return;
-              onRecordAction(change.id, adaptation.trim());
-              setAdaptation("");
+            if (await onRecordAction(change.id, adaptation.trim())) setAdaptation("");
             }}
           >
             <label className="block text-sm text-text-muted" htmlFor="requirement-adaptation">What did you change in the task?</label>
@@ -125,9 +128,6 @@ export default function WorkplaceSimulation({
             Your adaptation is saved. Submit task work that meets criteria version {change.criteria_version_number ?? "—"} to provide verifiable evidence.
           </p>
         )}
-        {(phase === "adapt" || phase === "verify" || phase === "assessed") && change?.assessment && (
-          <AssessmentSummary assessment={change.assessment} />
-        )}
         {otherEvents.length > 0 && (
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-text-faint">Other workplace updates</p>
@@ -137,7 +137,27 @@ export default function WorkplaceSimulation({
                   <p className="text-sm text-text">{event.title || event.event_type}</p>
                   <span className="text-[10px] capitalize text-text-faint">{event.status}</span>
                 </div>
+                {event.occurred_at && <p className="mt-1 text-[10px] text-text-faint">{new Date(event.occurred_at).toLocaleString()}</p>}
                 <p className="text-xs text-text-muted">{event.message}</p>
+                {event.description && event.description !== event.message && <p className="mt-1 whitespace-pre-wrap text-xs text-text-faint">{event.description}</p>}
+                {event.response && (
+                  <div className="mt-2 border-t border-white/[0.06] pt-2">
+                    <p className="text-[11px] text-text-faint">Your response</p>
+                    <p className="whitespace-pre-wrap text-xs text-text-muted">{event.response}</p>
+                  </div>
+                )}
+                {!event.response && event.status === "pending" && (
+                  <form className="mt-2 space-y-2" onSubmit={async (e) => {
+                    e.preventDefault();
+                    const value = (eventResponses[event.id] || "").trim();
+                    if (!value) return;
+                    if (await onReply(event.id, value)) setEventResponses((current) => ({ ...current, [event.id]: "" }));
+                  }}>
+                    <label className="sr-only" htmlFor={`workplace-event-${event.id}`}>Respond to {event.title || "workplace event"}</label>
+                    <textarea id={`workplace-event-${event.id}`} className="input min-h-16 w-full" value={eventResponses[event.id] || ""} onChange={(e) => setEventResponses((current) => ({ ...current, [event.id]: e.target.value }))} placeholder="Ask a question, explain your approach, or record a decision." />
+                    <button className="btn-ghost w-full" type="submit" disabled={isReplying || !eventResponses[event.id]?.trim()}>{isReplying ? "Saving…" : "Record response"}</button>
+                  </form>
+                )}
                 {(event.subsequent_actions || []).filter((item) => item.action === "adapted_work").map((item, index) => (
                   <div key={`${item.at || index}-${index}`} className="mt-2 border-t border-white/[0.06] pt-2">
                     <p className="text-[11px] text-text-faint">Adaptation saved for criteria v{item.criteria_version_number ?? "?"}</p>
@@ -151,21 +171,6 @@ export default function WorkplaceSimulation({
       </div>
       {popupRequired(change) && (
         <RequirementPopup event={change} onAcknowledge={onAcknowledge} isAcknowledging={isAcknowledging} />
-      )}
-    </div>
-  );
-}
-
-function AssessmentSummary({ assessment }) {
-  return (
-    <div className="rounded-xl border border-white/[0.07] p-3 text-sm">
-      <p className="text-xs uppercase tracking-wider text-text-faint">Soft-skill evidence</p>
-      <p className="mt-2">Communication: {observationLabel(assessment.communication)}</p>
-      <p>Adaptability: {observationLabel(assessment.adaptability)}</p>
-      {assessment.status === "insufficient_evidence" && (
-        <p className="mt-2 text-xs text-text-muted">
-          Scores stay unavailable until a recorded reply, adaptation action, and submitted task artifact support this changed requirement.
-        </p>
       )}
     </div>
   );

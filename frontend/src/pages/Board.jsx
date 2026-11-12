@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { useSimulation } from "../context/SimulationContext";
-import { useBoard, useUpdateTaskStatus } from "../hooks/useApi";
+import { useBoard, useSprints, useUpdateTaskStatus } from "../hooks/useApi";
 import { STATUS_ORDER, STATUS_META, VALID_TRANSITIONS } from "../lib/status";
 import Column from "../components/Column";
 import TaskDetailDrawer from "../components/TaskDetailDrawer";
@@ -11,7 +11,8 @@ import LoadingScreen from "../components/LoadingScreen";
 export default function Board() {
   const { simulation } = useSimulation();
   const { data: board, isLoading, error, refetch } = useBoard(simulation?.projectId, simulation?.id);
-  const updateStatus = useUpdateTaskStatus(simulation?.projectId);
+  const { data: sprints, isLoading: sprintsLoading, error: sprintError, refetch: refetchSprints } = useSprints(simulation?.projectId);
+  const updateStatus = useUpdateTaskStatus();
   const [selectedTask, setSelectedTask] = useState(null);
   const [banner, setBanner] = useState(null);
 
@@ -19,16 +20,23 @@ export default function Board() {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
   );
 
+  const sprintById = useMemo(() => new Map((sprints || []).map((sprint) => [sprint.id, sprint])), [sprints]);
+  const displayBoard = useMemo(() => board && Object.fromEntries(
+    Object.entries(board).map(([status, tasks]) => [status, tasks.map((task) => {
+      const sprint = sprintById.get(task.sprint_id);
+      return { ...task, sprint_name: sprint?.name, sprint_number: sprint?.sprint_number };
+    })])
+  ), [board, sprintById]);
   const allTasks = useMemo(
-    () => (board ? Object.values(board).flat() : []),
-    [board]
+    () => (displayBoard ? Object.values(displayBoard).flat() : []),
+    [displayBoard]
   );
 
   useEffect(() => {
     if (!selectedTask) return;
     const refreshed = allTasks.find((task) => task.id === selectedTask.id);
     if (refreshed && refreshed !== selectedTask) setSelectedTask(refreshed);
-  }, [allTasks, selectedTask?.id]);
+  }, [allTasks, selectedTask]);
 
   if (isLoading) return <LoadingScreen label="Loading the board" />;
   if (error) return <ErrorState message={error.message} onRetry={() => refetch()} />;
@@ -89,6 +97,8 @@ export default function Board() {
           <span>⚠</span>{banner}
         </motion.div>
       )}
+      {sprintError && <div className="mx-4 mt-2 rounded-xl border border-status-blocked/30 bg-status-blocked/5 px-4 py-2 text-xs text-status-blocked" role="alert">Sprint labels could not be loaded: {sprintError.message}<button className="btn-ghost ml-2" onClick={() => refetchSprints()}>Retry</button></div>}
+      {sprintsLoading && <p className="mx-4 mt-2 text-xs text-text-faint" role="status">Loading sprint labels…</p>}
       <div className="flex-1 overflow-x-auto p-4">
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
           <div className="flex h-full gap-3">
@@ -97,7 +107,7 @@ export default function Board() {
                 key={status}
                 status={status}
                 meta={STATUS_META[status]}
-                tasks={board?.[status] || []}
+                tasks={displayBoard?.[status] || []}
                 onOpenTask={openTask}
               />
             ))}

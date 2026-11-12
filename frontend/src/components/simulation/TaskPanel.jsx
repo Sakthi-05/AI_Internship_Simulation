@@ -197,6 +197,20 @@ export default function TaskPanel({
           </div>
         </section>
 
+        {(task.deliverables || task.task_metadata?.deliverables || []).length > 0 && (
+          <section>
+            <h3 className="mb-3 flex items-center gap-2 font-display text-xs font-bold uppercase tracking-[0.14em] text-text-faint">
+              <span className="flex h-5 w-5 items-center justify-center rounded-md bg-accent-cyan/15 text-[11px] text-accent-cyan">↗</span>
+              Expected deliverables
+            </h3>
+            <ul className="list-inside list-disc space-y-2 rounded-xl border p-4 text-sm text-text-muted">
+              {(task.deliverables || task.task_metadata?.deliverables || []).map((item, index) => (
+                <li key={`${index}-${item}`}>{typeof item === "string" ? item : item?.name || item?.description || JSON.stringify(item)}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {criteriaLines(task).length > 0 && (
           <section>
             <h3 className="mb-3 flex items-center gap-2 font-display text-xs font-bold uppercase tracking-[0.14em] text-text-faint">

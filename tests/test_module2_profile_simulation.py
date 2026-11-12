@@ -104,6 +104,13 @@ def test_assessed_profile_controls_generation_and_task_path(client):
     sprints = client.get(f"/api/projects/{body['project_id']}/sprints", headers=headers)
     assert sprints.status_code == 200
     assert len(sprints.json()) == 4
+    assert [sprint["name"] for sprint in sprints.json()] == [
+        "Sprint 1: Foundation and Onboarding",
+        "Sprint 2: Core Implementation",
+        "Sprint 3: Advanced Implementation and Workplace Challenges",
+        "Sprint 4: Integration and Project Completion",
+    ]
+    assert [sprint["sprint_number"] for sprint in sprints.json()] == [1, 2, 3, 4]
     assert sprints.json()[0]["goal"]
     assert sprints.json()[0]["start_date"]
 
@@ -117,6 +124,10 @@ def test_assessed_profile_controls_generation_and_task_path(client):
     current = client.get(f"/api/simulations/{body['simulation_id']}/tasks/current", headers=headers)
     assert current.status_code == 200, current.text
     assert current.json()["task_id"]
+    assert current.json()["objectives"]
+    assert current.json()["deliverables"]
+    assert current.json()["acceptance_criteria"]
+    assert "dependencies" in current.json()
 
     db = SessionLocal()
     try:

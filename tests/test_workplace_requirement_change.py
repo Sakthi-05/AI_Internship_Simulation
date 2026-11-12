@@ -270,20 +270,15 @@ def test_requirement_change_flow_persists_and_does_not_duplicate(client, auth_he
     )
     assert thin.status_code == 200, thin.text
     assert thin.json()["status"] == "acknowledged"
-    assert thin.json()["assessment"]["status"] == "insufficient_evidence"
-    assert thin.json()["assessment"]["communication"]["score"] is None
-    assert thin.json()["assessment"]["adaptability"]["score"] is None
+    assert thin.json()["assessment"] is None
+    assert thin.json()["evidence"]["response"] == "ok"
 
     # The thin reply is the one recorded reply. A useful reply cannot replace it,
     # so this student is a separate case below. Evidence rows still point at the event.
     evidence = db.execute(select(SoftSkillEvidence).where(SoftSkillEvidence.event_id == uuid.UUID(event["id"]))).scalars().all()
     db.expire_all()
     evidence = db.execute(select(SoftSkillEvidence).where(SoftSkillEvidence.event_id == uuid.UUID(event["id"]))).scalars().all()
-    assert {row.competency for row in evidence} == {"communication", "adaptability"}
-    assert all(row.student_id == student_id for row in evidence)
-    assert all(row.simulation_id == simulation_id for row in evidence)
-    assert all(row.task_id == task_id for row in evidence)
-    assert all(row.status == "insufficient_evidence" and row.score is None for row in evidence)
+    assert evidence == []
 
     duplicate_reply = client.post(
         f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{event['id']}/respond",
@@ -293,7 +288,7 @@ def test_requirement_change_flow_persists_and_does_not_duplicate(client, auth_he
     assert duplicate_reply.status_code == 409
 
 
-def test_substantive_reply_and_later_action_are_scored(client, auth_headers, db):
+def test_substantive_reply_and_later_action_are_saved_as_raw_evidence(client, auth_headers, db):
     student_id = "student_001"
     ids = _world(db, student_id)
     # The previous test already used student_001's company ownership. This test
@@ -336,10 +331,8 @@ def test_substantive_reply_and_later_action_are_scored(client, auth_headers, db)
     reloaded = client.get(f"/api/companies/{ids['company_id']}/chat/manager", headers=auth_headers).json()
     assert sum(message["id"] == manager_response["id"] for message in reloaded) == 1
     assert reply.json()["status"] == "acknowledged"
-    assert reply.json()["assessment"]["communication"]["status"] == "scored"
-    assert reply.json()["assessment"]["communication"]["score"] is not None
-    assert reply.json()["assessment"]["adaptability"]["status"] == "insufficient_evidence"
-    assert reply.json()["assessment"]["status"] == "insufficient_evidence"
+    assert reply.json()["assessment"] is None
+    assert reply.json()["evidence"]["response"].startswith("I will adapt the endpoint")
 
     early = client.post(
         f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{event['id']}/actions",
@@ -352,8 +345,8 @@ def test_substantive_reply_and_later_action_are_scored(client, auth_headers, db)
     ).json()["events"]
     stored = next(item for item in refreshed if item["id"] == event["id"])
     assert stored["phase"] == "adapt"
-    assert stored["assessment"]["adaptability"]["status"] == "insufficient_evidence"
-    assert stored["assessment"]["adaptability"]["score"] is None
+    assert stored["assessment"] is None
+    assert stored["evidence"]["actions"] == []
     assert stored["subsequent_actions"] == []
 
 
@@ -377,7 +370,7 @@ def test_unlinked_reply_is_insufficient_and_recorded_irrelevant_reply_is_poor(cl
     assert missing["communication"]["score"] is None
 
 
-def test_recorded_unrelated_reply_is_scored_as_poor_performance(client, db):
+def test_recorded_unrelated_reply_is_saved_without_module_two_scoring(client, db):
     from tests.conftest import make_token
 
     student_id = f"poor_comm_{uuid.uuid4().hex[:8]}"
@@ -394,10 +387,8 @@ def test_recorded_unrelated_reply_is_scored_as_poor_performance(client, db):
         data={"response": "The weather is nice and I enjoyed the coffee with everyone this morning."},
     )
     assert reply.status_code == 200, reply.text
-    communication = reply.json()["assessment"]["communication"]
-    assert communication["status"] == "scored"
-    assert communication["score"] == 35
-    assert reply.json()["assessment"]["adaptability"]["status"] == "insufficient_evidence"
+    assert reply.json()["assessment"] is None
+    assert reply.json()["evidence"]["response"].startswith("The weather")
 
 
 def test_communication_rubric_distinguishes_relevance_vagueness_and_detail():
@@ -440,7 +431,7 @@ def test_communication_rubric_distinguishes_relevance_vagueness_and_detail():
     assert missing["score"] is None
 
 
-def test_duplicate_chat_messages_do_not_inflate_event_communication_score(client, db):
+def test_duplicate_chat_messages_do_not_duplicate_raw_event_evidence(client, db):
     from tests.conftest import make_token
 
     student_id = f"duplicate_comm_{uuid.uuid4().hex[:8]}"
@@ -461,7 +452,7 @@ def test_duplicate_chat_messages_do_not_inflate_event_communication_score(client
         data={"response": reply_text},
     )
     assert reply.status_code == 200, reply.text
-    first = reply.json()["assessment"]["communication"]
+    assert reply.json()["assessment"] is None
     db.expire_all()
     stored_event = db.get(WorkflowEvent, uuid.UUID(event["id"]))
     original_message_id = stored_event.metadata_json["student_message_id"]
@@ -473,24 +464,14 @@ def test_duplicate_chat_messages_do_not_inflate_event_communication_score(client
     ))
     db.commit()
 
-    repeated = assess_requirement_change(
-        db,
-        db.get(Simulation, ids["simulation_id"]),
-        db.get(Task, ids["task_id"]),
-        db.get(WorkflowEvent, uuid.UUID(event["id"])),
-        student_id,
-    )
-    db.commit()
-    db.expire_all()
     evidence_rows = db.execute(
         select(SoftSkillEvidence).where(
             SoftSkillEvidence.event_id == uuid.UUID(event["id"]),
             SoftSkillEvidence.competency == "communication",
         )
     ).scalars().all()
-    assert len(evidence_rows) == 1
-    assert repeated["communication"]["score"] == first["score"] == 82
-    assert evidence_rows[0].evidence["supporting_evidence"]["message_id"] == original_message_id
+    assert evidence_rows == []
+    assert stored_event.metadata_json["student_message_id"] == original_message_id
 
     duplicate_reply = client.post(
         f"/api/simulations/{ids['simulation_id']}/tasks/{ids['task_id']}/events/{event['id']}/respond",
@@ -500,7 +481,7 @@ def test_duplicate_chat_messages_do_not_inflate_event_communication_score(client
     assert duplicate_reply.status_code == 409
 
 
-def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
+def test_adaptation_and_submission_keep_requirement_version_evidence(client, db):
     from tests.conftest import make_token
     student_id = f"adapt_{uuid.uuid4().hex[:8]}"
     headers = {"Authorization": f"Bearer {make_token(student_id)}"}
@@ -532,9 +513,7 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
     )
     assert action.status_code == 200, action.text
     assert action.json()["status"] == "acknowledged"
-    body = action.json()["assessment"]
-    assert body["adaptability"]["status"] == "insufficient_evidence"
-    assert body["adaptability"]["score"] is None
+    assert action.json()["assessment"] is None
     assert action.json()["subsequent_actions"][0]["criteria_version_id"] == event["criteria_version_id"]
 
     submitted = client.post(
@@ -544,12 +523,7 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
     )
     assert submitted.status_code == 201, submitted.text
     assert submitted.json()["version_id"]
-    submitted_assessment = next(
-        item for item in submitted.json()["requirement_change_assessments"]
-        if item["id"] == event["id"]
-    )
-    assert submitted_assessment["status"] == "resolved"
-    assert submitted_assessment["assessment"]["adaptability"]["status"] == "scored"
+    assert submitted.json()["requirement_change_assessments"] == []
 
     duplicate = client.post(
         f"/api/simulations/{simulation_id}/tasks/{task_id}/events/{event['id']}/actions",
@@ -562,11 +536,9 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
         f"/api/simulations/{simulation_id}/tasks/{task_id}/events", headers=headers
     ).json()["events"]
     stored = next(item for item in refreshed if item["id"] == event["id"])
-    assert stored["phase"] == "assessed"
-    assert stored["status"] == "resolved"
-    assert stored["assessment"]["adaptability"]["status"] == "scored"
-    assert stored["assessment"]["adaptability"]["score"] == 84
-    assert stored["status"] == "resolved"
+    assert stored["phase"] == "verify"
+    assert stored["status"] == "acknowledged"
+    assert stored["assessment"] is None
     assert stored["subsequent_actions"][0]["action"] == "adapted_work"
     assert criterion in stored["subsequent_actions"][0]["detail"]
     assert stored["subsequent_actions"][0]["event_id"] == event["id"]
@@ -579,34 +551,14 @@ def test_adaptation_that_mentions_the_new_requirement_is_scored(client, db):
     rows = db.execute(select(SoftSkillEvidence).where(SoftSkillEvidence.event_id == uuid.UUID(event["id"]))).scalars().all()
     db.expire_all()
     rows = db.execute(select(SoftSkillEvidence).where(SoftSkillEvidence.event_id == uuid.UUID(event["id"]))).scalars().all()
-    assert len(rows) == 2
-    assert all(row.student_id == student_id and row.task_id == task_id and row.simulation_id == simulation_id for row in rows)
-    adaptability_row = next(row for row in rows if row.competency == "adaptability")
-    assert adaptability_row.evidence["requirement_change_event_id"] == event["id"]
-    assert adaptability_row.evidence["criteria_version_id"] == event["criteria_version_id"]
-    assert adaptability_row.evidence["criteria_version_number"] == event["criteria_version_number"]
-    assert adaptability_row.evidence["supporting_evidence"]["submission_version_id"] == submitted.json()["version_id"]
-    prior_score = adaptability_row.score
-    reassessed = assess_requirement_change(
-        db,
-        db.get(Simulation, simulation_id),
-        db.get(Task, task_id),
-        db.get(WorkflowEvent, uuid.UUID(event["id"])),
-        student_id,
-    )
-    db.commit()
-    db.expire_all()
-    evidence_rows = db.execute(
-        select(SoftSkillEvidence).where(SoftSkillEvidence.event_id == uuid.UUID(event["id"]))
-    ).scalars().all()
-    assert len(evidence_rows) == 2
-    assert reassessed["adaptability"]["score"] == prior_score == 84
+    assert rows == []
+    assert stored["subsequent_actions"][1]["version_id"] == submitted.json()["version_id"]
 
     chat = client.get(f"/api/companies/{ids['company_id']}/chat/manager", headers=headers)
     assert chat.status_code == 200, chat.text
     assert any(item["sender_type"] == MessageSenderType.MANAGER.value and criterion in item["content"] for item in chat.json())
     assert any(item["sender_type"] == MessageSenderType.STUDENT.value for item in chat.json())
-    assert stored["status"] == "resolved"
+    assert stored["status"] == "acknowledged"
 
 
 def test_status_transition_cannot_issue_a_requirement_change(db):

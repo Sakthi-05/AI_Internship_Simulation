@@ -40,13 +40,12 @@ test("acknowledgment moves the student to a free-text reply, then an adaptation"
   assert.equal(workplacePhase(submittedOnly), "adapt");
   const adapted = { ...replied, subsequent_actions: [{ action: "adapted_work" }] };
   assert.equal(workplacePhase(adapted), "verify");
-  const assessed = {
+  const resolved = {
     ...adapted,
     status: "resolved",
-    assessment: { adaptability: { status: "scored", score: 84 } },
   };
-  assert.equal(workplacePhase(assessed), "assessed");
-  assert.equal(restoredPhase(assessed), "assessed");
+  assert.equal(workplacePhase(resolved), "verify");
+  assert.equal(restoredPhase(resolved), "verify");
 });
 
 test("successive requirement changes retain separate saved adaptations after refresh", () => {
@@ -57,7 +56,6 @@ test("successive requirement changes retain separate saved adaptations after ref
     response: "I will update validation for invalid input.",
     criteria_version_id: "criteria-v2",
     criteria_version_number: 2,
-    assessment: { adaptability: { status: "scored", score: 84 } },
     subsequent_actions: [{
       action: "adapted_work",
       event_id: "event-1",
@@ -74,7 +72,7 @@ test("successive requirement changes retain separate saved adaptations after ref
   };
   assert.equal(activeRequirementChange([first, second]).id, "event-2");
   const restoredFirst = JSON.parse(JSON.stringify(first));
-  assert.equal(restoredPhase(restoredFirst), "assessed");
+  assert.equal(restoredPhase(restoredFirst), "verify");
   assert.equal(restoredFirst.subsequent_actions[0].event_id, "event-1");
   assert.equal(restoredFirst.subsequent_actions[0].criteria_version_number, 2);
   assert.equal(workplacePhase({ ...second, status: "acknowledged", response: "reply", subsequent_actions: [] }), "adapt");

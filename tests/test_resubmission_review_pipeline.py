@@ -429,6 +429,9 @@ def test_h_resubmission_and_second_review_raise_their_own_event_and_notification
     second = _review(client, flow["headers"], flow["data"], flow["v2"], reviewer=flow["reviewer"])
     assert second.status_code == 201, second.text
     v2_review_id = second.json()["review_id"]
+    retry = _review(client, flow["headers"], flow["data"], flow["v2"], reviewer=flow["reviewer"])
+    assert retry.status_code == 201, retry.text
+    assert retry.json()["review_id"] == v2_review_id
 
     db = SessionLocal()
     try:
@@ -449,6 +452,17 @@ def test_h_resubmission_and_second_review_raise_their_own_event_and_notification
         ).scalars().all()
         fresh = [n for n in notifications if n.id not in seen_before]
         assert fresh, "second review must notify the student again"
+        assert len(fresh) == 1, "retrying the same version review must not duplicate its notification"
+        version_notifications = [
+            n for n in notifications
+            if str((n.context_json or {}).get("review_id")) in {
+                str(flow["v1_review"]["review_id"]), v2_review_id,
+            }
+        ]
+        assert len(version_notifications) == 2
+        assert {str(n.context_json["review_id"]) for n in version_notifications} == {
+            str(flow["v1_review"]["review_id"]), v2_review_id,
+        }
     finally:
         db.close()
 

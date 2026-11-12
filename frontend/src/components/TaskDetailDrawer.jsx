@@ -61,6 +61,16 @@ export default function TaskDetailDrawer({ task, allTasks, onClose, onUpdateStat
 
         <p className="mt-4 text-sm leading-relaxed text-text-muted">{task.description}</p>
 
+        {(task.deliverables || task.task_metadata?.deliverables || []).length > 0 && (
+          <Section title="Expected deliverables">
+            <ul className="list-inside list-disc space-y-1 text-sm text-text-muted">
+              {(task.deliverables || task.task_metadata?.deliverables || []).map((item, index) => (
+                <li key={`${index}-${item}`}>{typeof item === "string" ? item : item?.name || item?.description || JSON.stringify(item)}</li>
+              ))}
+            </ul>
+          </Section>
+        )}
+
         <Section title={task.criteria_version?.active_version_number ? `Acceptance criteria · version ${task.criteria_version.active_version_number}` : "Acceptance criteria"}>
           <ul className="list-inside list-disc space-y-1 text-sm text-text-muted">
             {criteriaLines(task).map((criterion) => (
@@ -82,6 +92,8 @@ export default function TaskDetailDrawer({ task, allTasks, onClose, onUpdateStat
 
         <Section title="Details">
           <dl className="grid grid-cols-2 gap-y-2 text-sm">
+            <dt className="text-text-faint">Sprint</dt>
+            <dd>{task.sprint_name || (task.sprint_number ? `Sprint ${task.sprint_number}` : "—")}</dd>
             <dt className="text-text-faint">Priority</dt>
             <dd style={{ color: PRIORITY_META[task.priority].color }}>{PRIORITY_META[task.priority].label}</dd>
             <dt className="text-text-faint">Estimated hours</dt>
@@ -203,6 +215,7 @@ export default function TaskDetailDrawer({ task, allTasks, onClose, onUpdateStat
               Report bug
             </button>
           </div>
+          {reportBug.error && <p className="mt-2 text-xs text-status-blocked" role="alert">Bug report could not be saved: {reportBug.error.message}</p>}
         </Section>
       </motion.div>
     </AnimatePresence>

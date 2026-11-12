@@ -16,6 +16,9 @@ This is the abstraction FEATURE 6 (AI Project Manager) and FEATURE 7
 (AI Teammates) will build on in the next phase.
 """
 import asyncio
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import logging
@@ -35,6 +38,43 @@ _GEMINI_AI_SERVICE: Optional["GeminiAIService"] = None
 _JSON_CACHE: Dict[str, Dict[str, Any]] = {}
 _JSON_CACHE_LIMIT = 64
 logger = logging.getLogger(__name__)
+AI_GENERATION_CONTEXT: ContextVar[dict[str, Optional[str]]] = ContextVar(
+    "ai_generation_context", default={}
+)
+
+
+def bind_ai_generation_context(generation_id: str, simulation_id: Optional[str] = None):
+    """Bind safe generation identifiers to provider-attempt logs."""
+    return AI_GENERATION_CONTEXT.set({"generation_id": generation_id, "simulation_id": simulation_id})
+
+
+def update_ai_simulation_context(simulation_id: str) -> None:
+    context = dict(AI_GENERATION_CONTEXT.get())
+    context["simulation_id"] = simulation_id
+    AI_GENERATION_CONTEXT.set(context)
+
+
+def _retry_after_seconds(response: Optional[httpx.Response]) -> Optional[float]:
+    if response is None:
+        return None
+    value = response.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _stable_prompt_seed(prompt: str) -> int:
+    """Use a process-independent seed so fallback copy survives retries/restarts."""
+    return int.from_bytes(hashlib.sha256(prompt.encode("utf-8")).digest()[:8], "big")
 
 
 class MalformedAIJSONError(ValueError):
@@ -225,7 +265,7 @@ class MockAIService(AIService):
 
         # Manager chat context (see app/services/ai_manager.py)
         if "the manager on project" in sp:
-            rng = random.Random(hash(prompt) & 0xFFFFFFFF)
+            rng = random.Random(_stable_prompt_seed(prompt))
             personality = "corporate"
             for key in self._MANAGER_REPLIES:
                 if key.replace("_", " ") in sp.lower() or key in sp.lower():
@@ -252,11 +292,11 @@ class MockAIService(AIService):
 
         # AI teammate chat context (see app/services/ai_teammates.py)
         if "teammate" in sp.lower() and "messaging" in sp.lower():
-            rng = random.Random(hash(prompt) & 0xFFFFFFFF)
+            rng = random.Random(_stable_prompt_seed(prompt))
             return rng.choice(self._TEAMMATE_REPLIES)
 
         # Default: company mission/description flavor text generation.
-        rng = random.Random(hash(prompt) & 0xFFFFFFFF)
+        rng = random.Random(_stable_prompt_seed(prompt))
         template = rng.choice(self._MISSION_TEMPLATES)
         return template.format(
             verb=rng.choice(self._VERBS),
@@ -532,13 +572,10 @@ class MockAIService(AIService):
 
 
 def is_transient_ai_overload(exc: BaseException) -> bool:
-    """True when an exception is a transient Gemini overload (HTTP 503).
-
-    Used to decide between a quick retry / friendly error and letting any
-    other failure propagate exactly as before.
-    """
+    """Whether a Gemini HTTP status is transient and eligible for retry."""
     response = getattr(exc, "response", None)
-    return getattr(response, "status_code", None) == 503
+    status_code = getattr(response, "status_code", None)
+    return status_code == 429 or (status_code is not None and 500 <= status_code < 600)
 
 
 class GeminiAIService(AIService):
@@ -546,11 +583,14 @@ class GeminiAIService(AIService):
 
     provider_name = "gemini"
 
-    # Three total requests means at most two retries. This matches the review
-    # endpoint's total timeout (3 * 20s plus 1s + 2s backoff, with headroom).
+    # Provider attempts are bounded; startup routes add a shorter operation
+    # timeout and use deterministic fallback if that budget is exceeded.
     OVERLOAD_MAX_ATTEMPTS = 3
+    MAX_ATTEMPTS = 3
     REQUEST_TIMEOUT_SECONDS = 20.0
-    OVERLOAD_RETRY_DELAYS_SECONDS = (1.0, 2.0)
+    RETRY_BASE_DELAY_SECONDS = 0.5
+    RETRY_MAX_DELAY_SECONDS = 5.0
+    RETRY_AFTER_MAX_SECONDS = 10.0
 
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key
@@ -581,7 +621,7 @@ class GeminiAIService(AIService):
                 generation["responseSchema"] = AI_REVIEW_RESPONSE_SCHEMA
 
         is_review_request = "senior engineering reviewer" in (system_prompt or "").lower()
-        max_attempts = self.OVERLOAD_MAX_ATTEMPTS if is_review_request else 2
+        max_attempts = self.OVERLOAD_MAX_ATTEMPTS if is_review_request else self.MAX_ATTEMPTS
         async with httpx.AsyncClient(timeout=self.REQUEST_TIMEOUT_SECONDS) as client:
             last_error: Optional[Exception] = None
             for attempt in range(max_attempts):
@@ -607,8 +647,11 @@ class GeminiAIService(AIService):
                     text = parts[0].get("text") if parts and isinstance(parts[0], dict) else None
                     if not isinstance(text, str) or not text.strip():
                         raise AIProviderResponseError("provider candidate did not contain text")
+                    generation_context = AI_GENERATION_CONTEXT.get()
                     logger.info(
-                        "Gemini request completed model=%s attempt=%d duration_ms=%d",
+                        "Gemini request completed generation_id=%s simulation_id=%s model=%s attempt=%d duration_ms=%d",
+                        generation_context.get("generation_id"),
+                        generation_context.get("simulation_id"),
                         self.model,
                         attempt + 1,
                         int((time.perf_counter() - request_started) * 1000),
@@ -618,23 +661,28 @@ class GeminiAIService(AIService):
                     last_error = exc
                     response = getattr(exc, "response", None)
                     status_code = getattr(response, "status_code", None)
-                    transient = (
-                        is_transient_ai_overload(exc)
-                        or status_code == 429
-                        or (status_code is not None and status_code >= 500)
-                        or isinstance(exc, httpx.RequestError)
-                    )
+                    transient = is_transient_ai_overload(exc) or isinstance(exc, httpx.RequestError)
                     if not transient or attempt + 1 >= max_attempts:
                         raise
-                    status_code = getattr(getattr(exc, "response", None), "status_code", None)
-                    delay = self.OVERLOAD_RETRY_DELAYS_SECONDS[min(attempt, len(self.OVERLOAD_RETRY_DELAYS_SECONDS) - 1)]
+                    retry_after = _retry_after_seconds(getattr(exc, "response", None))
+                    exponential_cap = min(
+                        self.RETRY_MAX_DELAY_SECONDS,
+                        self.RETRY_BASE_DELAY_SECONDS * (2 ** attempt),
+                    )
+                    delay = random.uniform(0.0, exponential_cap)
+                    if retry_after is not None:
+                        delay = max(delay, min(retry_after, self.RETRY_AFTER_MAX_SECONDS))
+                    generation_context = AI_GENERATION_CONTEXT.get()
                     logger.warning(
-                        "Gemini transient request failure model=%s status_code=%s attempt=%d/%d duration_ms=%d; retrying after %.1fs",
+                        "Gemini transient request failure generation_id=%s simulation_id=%s model=%s status_code=%s attempt=%d/%d duration_ms=%d retry_after_seconds=%s; retrying after %.2fs",
+                        generation_context.get("generation_id"),
+                        generation_context.get("simulation_id"),
                         self.model,
                         status_code,
                         attempt + 1,
                         max_attempts,
                         int((time.perf_counter() - request_started) * 1000),
+                        retry_after,
                         delay,
                     )
                     await asyncio.sleep(delay)

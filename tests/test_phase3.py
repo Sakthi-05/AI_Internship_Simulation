@@ -60,6 +60,21 @@ def test_manager_chat_replies_and_persists_history(client, auth_headers):
     assert len(history.json()) == 2
 
 
+def test_manager_chat_retry_returns_existing_exchange(client, auth_headers):
+    data = _generate(client, auth_headers, student_id="student_001")
+    url = f"/api/companies/{data['company_id']}/chat/manager"
+    request = {"content": "Can you clarify the API requirement?", "idempotency_key": "manager-chat-retry-01"}
+    first = client.post(url, headers=auth_headers, json=request)
+    second = client.post(url, headers=auth_headers, json=request)
+    assert first.status_code == second.status_code == 201
+    assert first.json()["student_message"]["id"] == second.json()["student_message"]["id"]
+    assert first.json()["reply"]["id"] == second.json()["reply"]["id"]
+    assert first.json()["student_message"]["simulation_id"] == data["simulation_id"]
+    assert first.json()["reply"]["simulation_id"] == data["simulation_id"]
+    history = client.get(url, headers=auth_headers).json()
+    assert len(history) == 2
+
+
 def test_team_chat_replies(client, auth_headers):
     data = _generate(client, auth_headers, student_id="student_001")
     company_id = data["company_id"]
@@ -161,3 +176,61 @@ def test_meeting_can_be_completed(client, auth_headers):
     )
     assert resp.status_code == 200
     assert resp.json()["completed"] is True
+
+
+def test_meeting_context_response_update_and_retry(client, auth_headers):
+    data = _generate(client, auth_headers, student_id="student_001")
+    project_id = data["project_id"]
+    meeting_url = f"/api/projects/{project_id}/meetings"
+    meetings = client.get(meeting_url, headers=auth_headers).json()
+    # Generation sends an invitation notification for sprint-planning
+    # meetings. Pick that meeting so the test covers the original invitation
+    # plus the distinct update notification.
+    meeting = next(item for item in meetings if item["meeting_type"] == "sprint_planning")
+    assert meeting["simulation_id"] == data["simulation_id"]
+
+    response_request = {
+        "response": "I will bring the deployment status and the open blocker.",
+        "idempotency_key": "meeting-response-retry-01",
+    }
+    first = client.post(f"{meeting_url}/{meeting['id']}/respond", headers=auth_headers, json=response_request)
+    second = client.post(f"{meeting_url}/{meeting['id']}/respond", headers=auth_headers, json=response_request)
+    assert first.status_code == second.status_code == 200
+    assert first.json()["response"] == second.json()["response"]
+
+    history = client.get(f"/api/simulations/{data['simulation_id']}/interactions", headers=auth_headers).json()
+    responses = [entry for entry in history["interactions"] if entry["interaction_type"] == "meeting_response"]
+    assert len(responses) == 1
+    assert responses[0]["metadata"]["meeting_id"] == meeting["id"]
+
+    update = {"agenda": "Review deployment readiness and blockers."}
+    updated = client.patch(f"{meeting_url}/{meeting['id']}", headers=auth_headers, json=update)
+    retry = client.patch(f"{meeting_url}/{meeting['id']}", headers=auth_headers, json=update)
+    assert updated.status_code == retry.status_code == 200
+    assert retry.json()["agenda"] == update["agenda"]
+    assert retry.json()["student_response"] == response_request["response"]
+    notifications = client.get(f"/api/companies/{data['company_id']}/notifications", headers=auth_headers).json()
+    related = [item for item in notifications if item["context_json"].get("meeting_id") == meeting["id"]]
+    assert len(related) == 2  # One invitation and one distinct update; the retry adds nothing.
+    assert all(item["simulation_id"] == data["simulation_id"] for item in related)
+
+    # A later state transition creates a new contextual notification, while
+    # retrying that same transition does not create another row. Returning to
+    # an earlier agenda is still a new update event.
+    second_update = {"agenda": "Confirm release owner and rollback plan."}
+    changed = client.patch(f"{meeting_url}/{meeting['id']}", headers=auth_headers, json=second_update)
+    retried = client.patch(f"{meeting_url}/{meeting['id']}", headers=auth_headers, json=second_update)
+    assert changed.status_code == retried.status_code == 200
+    notifications = client.get(f"/api/companies/{data['company_id']}/notifications", headers=auth_headers).json()
+    related = [item for item in notifications if item["context_json"].get("meeting_id") == meeting["id"]]
+    assert len(related) == 3
+
+    returned = client.patch(f"{meeting_url}/{meeting['id']}", headers=auth_headers, json=update)
+    returned_retry = client.patch(f"{meeting_url}/{meeting['id']}", headers=auth_headers, json=update)
+    assert returned.status_code == returned_retry.status_code == 200
+    notifications = client.get(f"/api/companies/{data['company_id']}/notifications", headers=auth_headers).json()
+    related = [item for item in notifications if item["context_json"].get("meeting_id") == meeting["id"]]
+    assert len(related) == 4
+    update_notifications = [item for item in related if item["context_json"].get("updated_fields")]
+    assert len(update_notifications) == 3
+    assert all(item["context_json"]["updated_fields"] == ["agenda"] for item in update_notifications)

@@ -7,13 +7,14 @@ Handles:
 - Event history and responses
 """
 from datetime import datetime, timezone
+import hashlib
 from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.enums import WorkflowEventType, TaskStatus
+from app.models.enums import NotificationType, WorkflowEventType, TaskStatus
 from app.models.simulation import Simulation, Scenario, WorkflowEvent
 from app.models.sprint import Sprint
 from app.models.task import Task
@@ -86,12 +87,21 @@ async def trigger_deadline_warning_event(
         occurred_at=datetime.now(timezone.utc),
         status="pending",
         metadata_json={
+            "scenario_key": "deadline_update",
             "remaining_minutes": remaining_minutes,
             "threshold_minutes": DEADLINE_WARNING_THRESHOLD_MINUTES,
         },
     )
     db.add(event)
     db.flush()
+    from app.services.notification_service import notify
+    notify(
+        db, simulation.company_id, NotificationType.DEADLINE_UPDATED,
+        f"Deadline approaching for '{task.title}': {remaining_minutes} minutes remain.",
+        simulation_id=simulation.id,
+        context={"task_id": str(task.id), "workflow_event_id": str(event.id), "remaining_minutes": remaining_minutes},
+        dedupe_key=f"deadline-warning:{simulation.id}:{task.id}:{task.deadline.isoformat() if task.deadline else 'no-deadline'}",
+    )
     
     # Log activity
     from app.services.activity_log_service import log_activity
@@ -132,7 +142,7 @@ async def trigger_stakeholder_message_event(
         description=message,
         trigger_condition=trigger_condition,
         action_required=action_required,
-        metadata=metadata or {},
+        metadata={"scenario_key": "stakeholder_feedback", **(metadata or {})},
     )
 
 
@@ -159,6 +169,7 @@ async def trigger_priority_change_event(
         trigger_condition=trigger_condition,
         action_required=True,
         metadata={
+            "scenario_key": "urgent_request" if str(new_priority).lower() in {"high", "critical", "urgent"} else "priority_update",
             "old_priority": old_priority,
             "new_priority": new_priority,
             "reason": reason,
@@ -174,6 +185,7 @@ async def trigger_bug_report_event(
     summary: str,
     severity: str = "medium",
     trigger_condition: str = "bug_reported",
+    notify_student: bool = True,
 ) -> WorkflowEvent:
     """Create a BUG_REPORT workflow event."""
     return await trigger_workflow_event(
@@ -188,9 +200,11 @@ async def trigger_bug_report_event(
         trigger_condition=trigger_condition,
         action_required=True,
         metadata={
+            "scenario_key": "bug_report",
             "severity": severity,
             "issue_summary": summary,
         },
+        notify_student=notify_student,
     )
 
 
@@ -220,6 +234,7 @@ async def trigger_sprint_review_event(
         trigger_condition="sprint_completed",
         action_required=False,
         metadata={
+            "scenario_key": "stakeholder_feedback",
             "sprint_id": str(sprint.id),
             "sprint_number": sprint.sprint_number,
             "completed_tasks": completed_tasks,
@@ -320,6 +335,7 @@ async def trigger_workflow_event(
     trigger_condition: Optional[str] = None,
     action_required: bool = False,
     metadata: Optional[dict] = None,
+    notify_student: bool = True,
 ) -> WorkflowEvent:
     """Generic function to trigger a workflow event."""
     simulation = db.get(Simulation, simulation_id)
@@ -344,6 +360,31 @@ async def trigger_workflow_event(
     )
     db.add(event)
     db.flush()
+
+    notification_type = {
+        WorkflowEventType.DEADLINE_WARNING: NotificationType.DEADLINE_UPDATED,
+        WorkflowEventType.BUG_REPORT: NotificationType.BUG_REPORTED,
+        WorkflowEventType.PRIORITY_CHANGE: NotificationType.TASK_ASSIGNED,
+        WorkflowEventType.REQUIREMENT_CHANGE: NotificationType.REQUIREMENT_CHANGED,
+    }.get(event_type, NotificationType.REQUIREMENT_CHANGED)
+    if event_type == WorkflowEventType.STAKEHOLDER_MESSAGE and (metadata or {}).get("scenario_key") == "blocker":
+        notification_type = NotificationType.DEPENDENCY_BLOCKED
+    identity = hashlib.sha256((message or "").encode("utf-8")).hexdigest()[:16]
+    from app.services.notification_service import notify
+    if notify_student:
+        notify(
+            db, simulation.company_id, notification_type, message,
+            simulation_id=simulation.id,
+            context={
+                "workflow_event_id": str(event.id),
+                "event_type": event_type.value,
+                "task_id": str(task_id) if task_id else None,
+                "scenario_id": str(scenario_id) if scenario_id else None,
+                "trigger_condition": trigger_condition,
+                "scenario_key": (metadata or {}).get("scenario_key"),
+            },
+            dedupe_key=f"workflow-event:{simulation.id}:{task_id}:{event_type.value}:{trigger_condition}:{identity}",
+        )
     
     # Log activity
     from app.services.activity_log_service import log_activity
@@ -379,8 +420,14 @@ async def respond_to_workflow_event(
     event.response = response
     event.responded_at = datetime.now(timezone.utc)
     event.status = "acknowledged"
-    event.metadata_json = event.metadata_json or {}
-    event.metadata_json["responded_by"] = user_id
+    response_metadata = dict(event.metadata_json or {})
+    response_metadata["responded_by"] = user_id
+    response_metadata["communication_evidence"] = {
+        "response": response,
+        "responded_at": event.responded_at.isoformat(),
+        "student_id": user_id,
+    }
+    event.metadata_json = response_metadata
     
     db.add(event)
     db.flush()

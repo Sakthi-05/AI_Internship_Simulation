@@ -8,6 +8,7 @@ Events Engine, Stateful Workflow rules, Meetings, Notifications,
 Activity Log, Timeline, and a real APScheduler background job.
 """
 import logging
+from time import perf_counter
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -61,6 +62,43 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan,
 )
+
+_PERFORMANCE_SENSITIVE_ROUTES = {
+    "/api/simulations/{simulation_id}",
+    "/api/simulations/{simulation_id}/tasks/current",
+    "/api/simulations/{simulation_id}/progress",
+    "/api/simulations/{simulation_id}/tasks/{task_id}/events",
+    "/api/companies/{company_id}/manager",
+    "/api/projects/{project_id}/state",
+}
+
+
+@app.middleware("http")
+async def log_slow_module2_requests(request, call_next):
+    """Log slow requested Module 2 reads without logging student data or IDs."""
+    started = perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (perf_counter() - started) * 1000
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", None)
+        if route_path in _PERFORMANCE_SENSITIVE_ROUTES and elapsed_ms >= 1000:
+            logger.warning(
+                "Slow Module 2 request method=%s route=%s status=500 duration_ms=%.1f",
+                request.method, route_path, elapsed_ms,
+            )
+        raise
+
+    elapsed_ms = (perf_counter() - started) * 1000
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", None)
+    if route_path in _PERFORMANCE_SENSITIVE_ROUTES and elapsed_ms >= 1000:
+        logger.warning(
+            "Slow Module 2 request method=%s route=%s status=%s duration_ms=%.1f",
+            request.method, route_path, response.status_code, elapsed_ms,
+        )
+    return response
 
 # The registry and agent instance are application-owned. Request-scoped DB and
 # provider dependencies are bound only for the duration of each review call.

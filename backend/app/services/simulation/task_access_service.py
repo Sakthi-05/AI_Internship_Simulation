@@ -11,8 +11,8 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, select
+from sqlalchemy.orm import Session, aliased, contains_eager, joinedload
 
 from app.models.enums import ReviewResult, SimulationStatus, SprintStatus, TaskStatus
 from app.models.simulation import Simulation
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_next_available_path_entry(
-    db: Session, simulation_id: UUID
+    db: Session, simulation_id: UUID, *, validate_graph: bool = True
 ) -> Optional[SimulationTaskPath]:
     """Return the first path entry that is unfinished and currently unlocked.
 
@@ -34,22 +34,32 @@ def get_next_available_path_entry(
     the student. Later sprint entries remain blocked until the current sprint is
     complete.
     """
-    entries = db.execute(
+    simulation = db.get(Simulation, simulation_id) if validate_graph else None
+    if simulation is not None:
+        _ensure_project_dependency_graph(db, simulation.project_id)
+    prerequisite = aliased(Task)
+    unmet_prerequisite = exists(
+        select(1)
+        .select_from(TaskDependency)
+        .join(prerequisite, prerequisite.id == TaskDependency.depends_on_task_id)
+        .where(
+            TaskDependency.task_id == Task.id,
+            prerequisite.status != TaskStatus.COMPLETED,
+        )
+    )
+    return db.execute(
         select(SimulationTaskPath)
         .join(Task, Task.id == SimulationTaskPath.task_id)
         .join(Sprint, Sprint.id == Task.sprint_id)
-        .where(SimulationTaskPath.simulation_id == simulation_id)
+        .options(contains_eager(SimulationTaskPath.task).contains_eager(Task.sprint))
+        .where(
+            SimulationTaskPath.simulation_id == simulation_id,
+            Task.status != TaskStatus.COMPLETED,
+            ~unmet_prerequisite,
+        )
         .order_by(Sprint.sprint_number, SimulationTaskPath.sequence)
-    ).scalars().all()
-
-    for entry in entries:
-        if entry.task.status == TaskStatus.COMPLETED:
-            continue
-        if not _dependencies_completed(db, entry.task_id):
-            continue
-        return entry
-
-    return None
+        .limit(1)
+    ).scalars().first()
 
 
 def sync_path_entry_statuses(db: Session, simulation: Simulation) -> int:
@@ -63,7 +73,9 @@ def sync_path_entry_statuses(db: Session, simulation: Simulation) -> int:
     number of entries repaired.
     """
     entries = db.execute(
-        select(SimulationTaskPath).where(SimulationTaskPath.simulation_id == simulation.id)
+        select(SimulationTaskPath)
+        .options(joinedload(SimulationTaskPath.task))
+        .where(SimulationTaskPath.simulation_id == simulation.id)
     ).scalars().all()
     repaired = 0
     for entry in entries:
@@ -78,6 +90,7 @@ def sync_path_entry_statuses(db: Session, simulation: Simulation) -> int:
         db.add(entry)
         repaired += 1
     if repaired:
+        db.info["simulation_read_repair_changed"] = True
         db.flush()
     return repaired
 
@@ -131,12 +144,14 @@ def heal_bogus_completion(db: Session, simulation: Simulation) -> Optional[Task]
     task.status = target
     task.completed_at = None
     db.add(task)
+    db.info["simulation_read_repair_changed"] = True
     db.flush()
     return task
 
 
 def repair_current_task(db: Session, simulation: Simulation) -> Optional[Task]:
     """Set a missing or stale current task to the valid path task, if any."""
+    _ensure_project_dependency_graph(db, simulation.project_id)
     heal_bogus_completion(db, simulation)
     sync_path_entry_statuses(db, simulation)
     if simulation.current_task_id:
@@ -146,9 +161,10 @@ def repair_current_task(db: Session, simulation: Simulation) -> Optional[Task]:
                 if current_task.status == TaskStatus.BACKLOG:
                     current_task.status = TaskStatus.TODO
                     db.add(current_task)
+                    db.info["simulation_read_repair_changed"] = True
                 return current_task
 
-    candidate = get_next_available_path_entry(db, simulation.id)
+    candidate = get_next_available_path_entry(db, simulation.id, validate_graph=False)
     if candidate is None:
         return None
 
@@ -156,13 +172,18 @@ def repair_current_task(db: Session, simulation: Simulation) -> Optional[Task]:
     if simulation.current_task_id != task.id:
         simulation.current_task_id = task.id
         db.add(simulation)
+        db.info["simulation_read_repair_changed"] = True
     if task.status == TaskStatus.BACKLOG:
         task.status = TaskStatus.TODO
         db.add(task)
+        db.info["simulation_read_repair_changed"] = True
     if candidate.status == TaskStatus.BACKLOG:
         candidate.status = TaskStatus.TODO
         db.add(candidate)
+        db.info["simulation_read_repair_changed"] = True
     if task.sprint and task.sprint.status != SprintStatus.COMPLETED:
+        if task.sprint.status != SprintStatus.ACTIVE:
+            db.info["simulation_read_repair_changed"] = True
         task.sprint.status = SprintStatus.ACTIVE
         db.add(task.sprint)
     return task
@@ -246,3 +267,91 @@ def _dependencies_completed(db: Session, task_id: UUID) -> bool:
         )
     ).first()
     return incomplete is None
+
+
+def _ensure_project_dependency_graph(db: Session, project_id: UUID) -> None:
+    try:
+        validate_project_dependency_graph(db, project_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Task dependency graph is invalid: {exc}",
+        ) from exc
+
+
+def add_task_dependency(db: Session, task_id: UUID, prerequisite_id: UUID) -> TaskDependency:
+    """Persist one same-project prerequisite edge only when it stays acyclic."""
+    task = db.get(Task, task_id)
+    prerequisite = db.get(Task, prerequisite_id)
+    if task is None or prerequisite is None:
+        raise ValueError("Dependency tasks must both exist")
+    if task_id == prerequisite_id:
+        raise ValueError("A task cannot depend on itself")
+    if task.sprint.project_id != prerequisite.sprint.project_id:
+        raise ValueError("Task dependencies must stay within the same project")
+
+    graph = _project_dependency_graph(db, task.sprint.project_id)
+    if _can_reach(graph, prerequisite_id, task_id):
+        raise ValueError("Dependency would create a circular prerequisite chain")
+
+    dependency = TaskDependency(task_id=task_id, depends_on_task_id=prerequisite_id)
+    db.add(dependency)
+    db.flush()
+    validate_project_dependency_graph(db, task.sprint.project_id)
+    return dependency
+
+
+def validate_project_dependency_graph(db: Session, project_id: UUID) -> None:
+    """Reject missing, cross-project, self, or cyclic task prerequisites."""
+    graph = _project_dependency_graph(db, project_id)
+    for task_id, prerequisites in graph.items():
+        for prerequisite_id in prerequisites:
+            if prerequisite_id == task_id:
+                raise ValueError("A task cannot depend on itself")
+            if prerequisite_id not in graph:
+                raise ValueError("Task dependencies must stay within the same project")
+    visiting: set[UUID] = set()
+    visited: set[UUID] = set()
+
+    def visit(task_id: UUID) -> None:
+        if task_id in visiting:
+            raise ValueError("Dependency graph contains a circular prerequisite chain")
+        if task_id in visited:
+            return
+        visiting.add(task_id)
+        for prerequisite_id in graph.get(task_id, []):
+            visit(prerequisite_id)
+        visiting.remove(task_id)
+        visited.add(task_id)
+
+    for task_id in graph:
+        visit(task_id)
+
+
+def _project_dependency_graph(db: Session, project_id: UUID) -> dict[UUID, list[UUID]]:
+    task_ids = db.execute(
+        select(Task.id).join(Sprint, Sprint.id == Task.sprint_id)
+        .where(Sprint.project_id == project_id)
+    ).scalars().all()
+    graph: dict[UUID, list[UUID]] = {task_id: [] for task_id in task_ids}
+    if task_ids:
+        for task_id, prerequisite_id in db.execute(
+            select(TaskDependency.task_id, TaskDependency.depends_on_task_id)
+            .where(TaskDependency.task_id.in_(task_ids))
+        ).all():
+            graph[task_id].append(prerequisite_id)
+    return graph
+
+
+def _can_reach(graph: dict[UUID, list[UUID]], start: UUID, target: UUID) -> bool:
+    pending = [start]
+    visited: set[UUID] = set()
+    while pending:
+        current = pending.pop()
+        if current == target:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        pending.extend(graph.get(current, []))
+    return False

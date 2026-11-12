@@ -700,8 +700,15 @@ def persist_proactive_message(
     actor: str = "system",
     event_id: Optional[str] = None,
 ) -> Message:
+    from app.models.simulation import Simulation
+    from app.models.enums import SimulationStatus
+    simulation_id = db.execute(select(Simulation.id).where(
+        Simulation.company_id == company_id,
+        Simulation.status == SimulationStatus.IN_PROGRESS,
+    ).order_by(Simulation.created_at.desc()).limit(1)).scalar_one_or_none()
     msg = Message(
         company_id=company_id,
+        simulation_id=simulation_id,
         sender_type=sender_type,
         sender_id=sender_id,
         content=content,

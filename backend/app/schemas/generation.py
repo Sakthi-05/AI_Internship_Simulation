@@ -33,3 +33,4 @@ class GenerationResponse(BaseModel):
     role: str
     company_type: CompanyType
     focus_competencies: List[str] = []
+    generation_source: str = "deterministic_fallback"

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
+import "./OnboardingAuth.css";
 import { useAuth } from "../context/AuthContext";
 import { useSimulation } from "../context/SimulationContext";
 import { useGenerateSimulation } from "../hooks/useApi";
@@ -41,7 +42,7 @@ function isTransportFailure(err) {
 function Stepper({ step }) {
   const activeIdx = STEP_ORDER.indexOf(step);
   return (
-    <div className="mt-6 flex items-center gap-1.5">
+    <div className="onboarding-stepper mt-6 flex items-center gap-1.5">
       {STEP_ORDER.map((s, i) => {
         const done = i < activeIdx;
         const active = i === activeIdx;
@@ -104,12 +105,21 @@ export default function Onboarding() {
   const resumable = pickResumableSimulation(mySimulations);
 
   const [mode, setMode] = useState("login");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(() => {
+    try { return localStorage.getItem("aiwse:remembered-email") || ""; }
+    catch { return ""; }
+  });
+  const [rememberMe, setRememberMe] = useState(() => {
+    try { return Boolean(localStorage.getItem("aiwse:remembered-email")); }
+    catch { return false; }
+  });
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [fullName, setFullName] = useState("");
   const [studentId, setStudentId] = useState("student_001");
   const [loginRole, setLoginRole] = useState("student");
   const [authError, setAuthError] = useState(null);
+  const [authNotice, setAuthNotice] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const [profile, setProfile] = useState(null);
@@ -252,11 +262,20 @@ export default function Onboarding() {
   const handleAuth = async (event) => {
     event.preventDefault();
     setAuthError(null);
+    setAuthNotice(null);
     setBusy(true);
     try {
       const session = mode === "register"
         ? await register({ email, password, fullName })
         : await login(email, password);
+      if (mode === "login") {
+        try {
+          if (rememberMe) localStorage.setItem("aiwse:remembered-email", email.trim());
+          else localStorage.removeItem("aiwse:remembered-email");
+        } catch {
+          // Remembering the email is optional; authentication has already succeeded.
+        }
+      }
       if (session.role === "admin") navigate("/admin");
     } catch (err) {
       setAuthError(err.message);
@@ -474,12 +493,16 @@ export default function Onboarding() {
         difficulty: result.difficulty,
         duration_weeks: result.duration_weeks,
         total_tasks: result.task_count,
+        generationSource: result.generation_source,
         status: "not_started",
         studentId: auth.studentId,
       });
       navigate("/simulation");
     } catch (err) {
-      setFormError(err.message);
+      const detail = /timeout|network/i.test(err?.message || "")
+        ? "The generation request timed out. It may still be processing; retry safely to recover the same simulation."
+        : err.message;
+      setFormError(detail);
     }
   };
 
@@ -519,10 +542,199 @@ export default function Onboarding() {
       return Number.isInteger(rating) && rating >= 1 && rating <= 5;
     });
 
+  if (step === "auth") {
+    return (
+      <main className="auth-page">
+        <div className="auth-layout">
+          <section className="auth-story" aria-labelledby="auth-story-title">
+            <div className="auth-story-inner">
+              <a className="auth-brand" href="/" aria-label="AI Internship Simulator home">
+                <span className="auth-brand-mark" aria-hidden="true">
+                  <svg viewBox="0 0 32 32" fill="none">
+                    <path d="M16 3.8 26.6 9.9v12.2L16 28.2 5.4 22.1V9.9L16 3.8Z" stroke="currentColor" strokeWidth="1.7" />
+                    <path d="m11.1 18.7 3.2-7.2 2.1 4.4 1.4-2.7 3.1 5.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+                <span className="auth-brand-copy">
+                  <strong>AI Internship Simulator</strong>
+                  <small>Adaptive Workflow Simulation</small>
+                </span>
+              </a>
+
+              <div className="auth-story-copy">
+                <span className="auth-kicker"><i /> A workplace built for your next step</span>
+                <h1 id="auth-story-title">Make your next move <span>feel familiar.</span></h1>
+                <p>Practice the work, decisions, and collaboration of a real team—then bring that confidence into your career.</p>
+              </div>
+
+              <div className="auth-visual" aria-label="Connected simulation workflow illustration">
+                <svg className="auth-visual-lines" viewBox="0 0 620 350" fill="none" aria-hidden="true">
+                  <path d="M71 245C142 245 133 111 235 111s87 132 186 132 76-125 154-125" stroke="url(#auth-line-a)" strokeWidth="1.4" />
+                  <path d="M76 292c97 0 91-97 174-97 93 0 86 90 174 90 67 0 78-72 149-72" stroke="url(#auth-line-b)" strokeWidth="1" strokeDasharray="4 7" />
+                  <circle cx="71" cy="245" r="5" fill="#A5B4FC" />
+                  <circle cx="235" cy="111" r="5" fill="#C4B5FD" />
+                  <circle cx="421" cy="243" r="5" fill="#93C5FD" />
+                  <circle cx="575" cy="118" r="5" fill="#A5B4FC" />
+                  <defs>
+                    <linearGradient id="auth-line-a" x1="71" y1="111" x2="575" y2="243" gradientUnits="userSpaceOnUse">
+                      <stop stopColor="#818CF8" stopOpacity=".14" />
+                      <stop offset=".52" stopColor="#A78BFA" stopOpacity=".8" />
+                      <stop offset="1" stopColor="#60A5FA" stopOpacity=".18" />
+                    </linearGradient>
+                    <linearGradient id="auth-line-b" x1="76" y1="195" x2="573" y2="292" gradientUnits="userSpaceOnUse">
+                      <stop stopColor="#60A5FA" stopOpacity=".12" />
+                      <stop offset=".52" stopColor="#818CF8" stopOpacity=".48" />
+                      <stop offset="1" stopColor="#A78BFA" stopOpacity=".14" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+                <div className="auth-orbit auth-orbit-one" />
+                <div className="auth-orbit auth-orbit-two" />
+                <div className="auth-work-card auth-work-card-main">
+                  <div className="auth-work-card-top"><span className="auth-work-mark">AI</span><span>Simulation workspace</span><b>LIVE</b></div>
+                  <div className="auth-work-title">Project workflow</div>
+                  <div className="auth-work-flow">
+                    <div className="auth-flow-step auth-flow-done"><span>✓</span><small>Understand</small></div>
+                    <i />
+                    <div className="auth-flow-step auth-flow-active"><span>02</span><small>Build</small></div>
+                    <i />
+                    <div className="auth-flow-step"><span>03</span><small>Review</small></div>
+                  </div>
+                  <div className="auth-work-progress"><span /><span /><span /></div>
+                  <div className="auth-work-foot"><span>Adaptive task path</span><span>01 / 04</span></div>
+                </div>
+                <div className="auth-float-chip auth-float-left"><span>✳</span> Real team scenarios</div>
+                <div className="auth-float-chip auth-float-right"><span>↗</span> Skills in action</div>
+              </div>
+
+              <div className="auth-story-foot">
+                <span>Build practical experience, one sprint at a time.</span>
+                <span className="auth-story-foot-dot" aria-hidden="true" />
+                <span>Designed for early-career talent</span>
+              </div>
+            </div>
+          </section>
+
+          <section className="auth-form-panel" aria-label={mode === "login" ? "Sign in" : "Create account"}>
+            <motion.div
+              className="auth-form-wrap"
+              key={mode}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28, ease: "easeOut" }}
+            >
+              <div className="auth-mobile-brand">
+                <span className="auth-brand-mark" aria-hidden="true">⬡</span>
+                <strong>AI Internship Simulator</strong>
+              </div>
+              <div className="auth-form-heading">
+                <span className="auth-secure-label"><i /> Secure workspace access</span>
+                <h2>{mode === "login" ? "Welcome back" : "Create your account"}</h2>
+                <p>{mode === "login" ? "Sign in to continue your workplace simulation." : "Set up your account to begin your career simulation."}</p>
+              </div>
+
+              <form className="auth-form" onSubmit={handleAuth}>
+                {mode === "register" && (
+                  <AuthField label="Full name">
+                    <input className="auth-input" autoComplete="name" value={fullName} onChange={(event) => setFullName(event.target.value)} required placeholder="Your name" />
+                  </AuthField>
+                )}
+                <AuthField label="Email address">
+                  <span className="auth-input-icon" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" fill="none"><rect x="2.6" y="4.2" width="14.8" height="11.6" rx="2.3" stroke="currentColor" strokeWidth="1.4" /><path d="m3.5 5.3 6.5 5.2 6.5-5.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </span>
+                  <input className="auth-input auth-input-with-icon" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required placeholder="you@example.com" />
+                </AuthField>
+                <AuthField label="Password">
+                  <span className="auth-input-icon" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" fill="none"><rect x="3.5" y="8.2" width="13" height="9" rx="2" stroke="currentColor" strokeWidth="1.4" /><path d="M6.3 8.2V5.9a3.7 3.7 0 0 1 7.4 0v2.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+                  </span>
+                  <input className="auth-input auth-input-with-icon auth-password-input" type={showPassword ? "text" : "password"} autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} minLength={mode === "register" ? 8 : 1} required placeholder={mode === "register" ? "At least 8 characters" : "Enter your password"} />
+                  <button className="auth-password-toggle" type="button" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword}>
+                    {showPassword ? "Hide" : "Show"}
+                  </button>
+                </AuthField>
+
+                {mode === "login" && (
+                  <div className="auth-options">
+                    <label className="auth-remember">
+                      <input type="checkbox" checked={rememberMe} onChange={(event) => setRememberMe(event.target.checked)} />
+                      <span>Remember me</span>
+                    </label>
+                    <button className="auth-text-button" type="button" onClick={() => { setAuthError(null); setAuthNotice("Password reset isn’t available yet. Please contact your platform administrator."); }}>
+                      Forgot password?
+                    </button>
+                  </div>
+                )}
+
+                {authError && <p className="auth-message auth-message-error" role="alert">{authError}</p>}
+                {authNotice && <p className="auth-message auth-message-note" role="status">{authNotice}</p>}
+                <button className="auth-submit" type="submit" disabled={busy}>
+                  <span>{busy ? "Please wait…" : mode === "register" ? "Create account" : "Sign in"}</span>
+                  {!busy && <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h11M10 5l5 5-5 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                </button>
+              </form>
+
+              <p className="auth-switch-mode">
+                {mode === "login" ? "New to the platform?" : "Already have an account?"}{" "}
+                <button type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setAuthError(null); setAuthNotice(null); }}>
+                  {mode === "login" ? "Create an account" : "Sign in"}
+                </button>
+              </p>
+
+              <details className="auth-dev-signin">
+                <summary>Development sign-in</summary>
+                <form onSubmit={handleDev}>
+                  <AuthField label="Student ID"><input className="auth-input" value={studentId} onChange={(event) => setStudentId(event.target.value)} required /></AuthField>
+                  <AuthField label="Mode"><select className="auth-input" value={loginRole} onChange={(event) => setLoginRole(event.target.value)}><option value="student">Student</option><option value="admin">Admin</option></select></AuthField>
+                  <button className="auth-dev-button" type="submit" disabled={busy}>Mint development token</button>
+                </form>
+              </details>
+              <p className="auth-legal">By continuing, you agree to use the platform responsibly and keep your account credentials private.</p>
+            </motion.div>
+          </section>
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <div className="relative min-h-full overflow-y-auto">
+    <main className="auth-page onboarding-auth-page">
+      <div className="auth-layout onboarding-auth-layout">
+        <section className="auth-story onboarding-story" aria-labelledby="onboarding-story-title">
+          <div className="auth-story-inner onboarding-story-inner">
+            <a className="auth-brand" href="/" aria-label="AI Internship Simulator home">
+              <span className="auth-brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 32 32" fill="none">
+                  <path d="M16 3.8 26.6 9.9v12.2L16 28.2 5.4 22.1V9.9L16 3.8Z" stroke="currentColor" strokeWidth="1.7" />
+                  <path d="m11.1 18.7 3.2-7.2 2.1 4.4 1.4-2.7 3.1 5.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+              <span className="auth-brand-copy"><strong>AI Internship Simulator</strong><small>Adaptive Workflow Simulation</small></span>
+            </a>
+            <div className="auth-story-copy onboarding-story-copy">
+              <span className="auth-kicker"><i /> Module 1 · Your career profile</span>
+              <h1 id="onboarding-story-title">Build a path <span>that fits you.</span></h1>
+              <p>Share your goals, show what you know, and get a workplace simulation shaped around your skills.</p>
+            </div>
+            <div className="onboarding-story-visual" aria-hidden="true">
+              <div className="onboarding-orbit onboarding-orbit-a" />
+              <div className="onboarding-orbit onboarding-orbit-b" />
+              <div className="onboarding-preview-card">
+                <div className="onboarding-preview-top"><span className="auth-work-mark">AI</span><span>Personalized career path</span><b>MODULE 01</b></div>
+                <div className="onboarding-preview-title">From your skills to real work</div>
+                <div className="onboarding-preview-steps"><span>Profile</span><i /><span>Assessment</span><i /><span>Internship</span></div>
+                <div className="onboarding-preview-track"><span style={{ width: `${Math.max(20, ((STEP_ORDER.indexOf(step) + 1) / STEP_ORDER.length) * 100)}%` }} /></div>
+                <div className="onboarding-preview-foot"><span>Designed around your strengths</span><span>{String(STEP_ORDER.indexOf(step) + 1).padStart(2, "0")} / 05</span></div>
+              </div>
+            </div>
+            <div className="auth-story-foot onboarding-story-foot"><span>Practical experience starts with a clear picture of you.</span></div>
+          </div>
+        </section>
+        <section className="auth-form-panel onboarding-form-panel" aria-label="Internship profile setup">
+          <div className="onboarding-flow-page relative min-h-full overflow-y-auto">
       <AmbientBackground density={18} />
-      <div className="relative z-10 mx-auto max-w-2xl px-6 py-10">
+      <div className="onboarding-flow-content relative z-10 mx-auto max-w-2xl px-6 py-10">
       <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}>
         <div className="text-center">
           <motion.div
@@ -949,7 +1161,10 @@ export default function Onboarding() {
         )}
       </motion.div>
       </div>
-    </div>
+          </div>
+        </section>
+      </div>
+    </main>
   );
 }
 
@@ -958,6 +1173,15 @@ function Field({ label, children }) {
     <label className="block">
       <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-text-faint">{label}</span>
       {children}
+    </label>
+  );
+}
+
+function AuthField({ label, children }) {
+  return (
+    <label className="auth-field">
+      <span className="auth-field-label">{label}</span>
+      <span className="auth-field-control">{children}</span>
     </label>
   );
 }

@@ -95,6 +95,7 @@ def generate_project(
     technology_stack: List[str],
     difficulty: DifficultyLevel,
     company_type: Optional[CompanyType] = None,
+    deterministic_seed: Optional[str] = None,
 ) -> Project:
     """
     Select a catalog project and persist it as a Project ORM entity.
@@ -107,7 +108,7 @@ def generate_project(
     if not technology_stack:
         raise ProjectGenerationError("technology_stack must contain at least one item")
 
-    rng = random.Random()
+    rng = random.Random(deterministic_seed) if deterministic_seed is not None else random.Random()
 
     try:
         resolved_company_type = _resolve_company_type(db, company_id, company_type)
