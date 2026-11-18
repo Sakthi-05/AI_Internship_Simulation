@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { criteriaLines, criteriaStateLabel, earlierCriteria } from "./criteriaDisplay";
 import SubmissionModal from "./SubmissionModal";
@@ -27,14 +27,20 @@ export default function TaskPanel({
 }) {
   const [remainingTime, setRemainingTime] = useState(task?.remaining_time);
   const [deadlineMissed, setDeadlineMissed] = useState(task?.deadline_missed);
-  const [editorCode, setEditorCode] = useState("");
+  const editorCodeRef = useRef("");
   const [hasEditorWork, setHasEditorWork] = useState(false);
 
   // Merge the CodeEditor draft into submission metadata so code counts as work evidence.
   const handleSubmitWithCode = (files, metadata) => {
     const merged = { ...(metadata || {}) };
-    if (editorCode?.trim() && !merged.code) {
-      merged.code = editorCode;
+    // Read the synchronous editor snapshot. React state updates from the
+    // editor callback may not have committed yet when submit is clicked.
+    const currentEditorCode = editorCodeRef.current;
+    if (currentEditorCode?.trim() && !merged.code) {
+      merged.code = currentEditorCode;
+    }
+    if (typeof merged.code === "string" && !merged.expected_end_marker) {
+      merged.expected_end_marker = merged.code.trimEnd().split(/\r?\n/).at(-1) || "";
     }
     return onSubmit(files, merged);
   };
@@ -256,7 +262,9 @@ export default function TaskPanel({
                   key={`${project?.id || simulation?.project_id || "noproject"}-${task.task_id}`}
                   task={task}
                   project={project}
-                  onCodeChange={setEditorCode}
+                  onCodeChange={(code) => {
+                    editorCodeRef.current = code;
+                  }}
                   onWorkChange={setHasEditorWork}
                   readOnly={!canEditWork}
                 />

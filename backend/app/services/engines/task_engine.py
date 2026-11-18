@@ -155,6 +155,15 @@ def generate_tasks_for_project(
         raise TaskEngineError("project must be flushed before generating tasks")
 
     try:
+        db.execute(select(Project).where(Project.id == project.id).with_for_update()).scalar_one()
+        existing_tasks = db.execute(
+            select(Task)
+            .join(Sprint, Sprint.id == Task.sprint_id)
+            .where(Sprint.project_id == project.id)
+            .order_by(Sprint.sprint_number, Task.sequence)
+        ).scalars().all()
+        if existing_tasks:
+            return existing_tasks
         rng = random.Random(f"{project.id}-{student_id}-{role}-{difficulty.value}")
         backlog = _read_project_backlog(project)
         sprints = _resolve_sprints(db, project)

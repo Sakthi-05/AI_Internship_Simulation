@@ -24,4 +24,14 @@ class Notification(Base, UUIDPKMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_notifications_company_id", "company_id"),
         Index("ix_notifications_is_read", "is_read"),
+        # Partial index on (company_id, notification_type, created_at DESC)
+        # for efficient cooldown duplicate lookups.  Covers the WHERE clause
+        # used by _find_recent_duplicate() so the query hits only recent rows.
+        Index(
+            "ix_notifications_cooldown_lookup",
+            "company_id",
+            "notification_type",
+            "created_at",
+        ),
     )
+

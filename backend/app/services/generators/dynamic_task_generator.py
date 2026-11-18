@@ -28,10 +28,15 @@ from app.models.sprint import Sprint
 from app.models.submission import AIReview, Submission, SubmissionVersion
 from app.models.task import Task, TaskDependency
 from app.models.task_path import SimulationTaskPath
+from app.core.config import settings
 from app.services.ai.ai_service import get_ai_service
 from app.services.intelligence_service import calculate_performance_trend, get_or_create_profile
 
 logger = logging.getLogger(__name__)
+
+
+class DynamicTaskLimitReached(ValueError):
+    """No more configured dynamic tasks may be added to this sprint."""
 
 
 async def generate_dynamic_task(
@@ -43,6 +48,54 @@ async def generate_dynamic_task(
     competency_focus: Optional[Dict[str, Any]] = None,
 ) -> Task:
     """Generate next task dynamically based on actual student technical work."""
+    # Serialize generation and give each predecessor a stable idempotency key.
+    locked_simulation = db.execute(
+        select(Simulation).where(Simulation.id == simulation.id).with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+    simulation = locked_simulation
+    sprint = db.execute(
+        select(Sprint).where(Sprint.id == sprint.id).with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+    generation_key = f"{simulation.id}:{sprint.id}:{previous_task.id if previous_task else 'initial'}"
+    existing = db.execute(
+        select(Task).where(
+            Task.sprint_id == sprint.id,
+            Task.task_metadata["generation_key"].as_string() == generation_key,
+        )
+    ).scalars().first()
+    if existing is not None:
+        return existing
+    if sprint.status.value == "completed":
+        raise DynamicTaskLimitReached("Cannot generate a task for a completed sprint.")
+    generated_tasks = db.execute(
+        select(Task)
+        .join(SimulationTaskPath, SimulationTaskPath.task_id == Task.id)
+        .where(
+            Task.sprint_id == sprint.id,
+            SimulationTaskPath.simulation_id == simulation.id,
+        )
+    ).scalars().all()
+    generated_tasks = [
+        item for item in generated_tasks
+        if (item.task_metadata or {}).get("dynamic_generation") is True
+    ]
+    if len(generated_tasks) >= max(1, int(settings.MAX_DYNAMIC_TASKS_PER_SPRINT)):
+        raise DynamicTaskLimitReached(
+            f"Sprint {sprint.sprint_number} reached its configured dynamic task limit."
+        )
+    generation_kind = "planned" if not generated_tasks else "adaptive"
+    sprint_metadata = dict(sprint.sprint_metadata or {})
+    sprint_metadata.setdefault("generation_version", 1)
+    sprint_metadata.setdefault("planned_task_count", 1)
+    sprint_metadata.setdefault("dynamic_task_limit", max(1, int(settings.MAX_DYNAMIC_TASKS_PER_SPRINT)))
+    sprint_metadata.setdefault(
+        "adaptive_task_limit",
+        max(0, int(sprint_metadata["dynamic_task_limit"]) - int(sprint_metadata["planned_task_count"])),
+    )
+    sprint.sprint_metadata = sprint_metadata
+    db.add(sprint)
     profile = get_or_create_profile(db, student_id)
     trend_data = calculate_performance_trend(db, student_id, simulation.id)
     
@@ -204,6 +257,11 @@ async def generate_dynamic_task(
         estimated_hours=float(task_payload.get("estimated_hours", 4.0)),
         deadline=deadline,
         task_metadata={
+            "dynamic_generation": True,
+            "generation_simulation_id": str(simulation.id),
+            "generation_key": generation_key,
+            "generation_version": 1,
+            "generation_kind": generation_kind,
             "hints": hints,
             "recommended_team_role": recommended_role,
             "generation_reason": gen_reason,

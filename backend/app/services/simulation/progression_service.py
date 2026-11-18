@@ -118,7 +118,7 @@ async def progress_to_next_task(
         # Dynamic tasks are now generated in the review pipeline after each approved task
         # This section is kept for backward compatibility with legacy simulations
         current_sprint = db.get(Sprint, completed_task.sprint_id)
-        if current_sprint and current_sprint.status != SprintStatus.COMPLETED:
+        if current_sprint and current_sprint.status not in (SprintStatus.COMPLETED, SprintStatus.BLOCKED):
             # For dynamic mode, tasks are generated in review_service.py after approval
             # This path is only reached for legacy simulations or if review generation failed
             # We still provide a fallback task if the sprint is not complete
@@ -479,6 +479,21 @@ async def _sync_sprint_completion(db: Session, simulation: Simulation, sprint_id
             Task.status != TaskStatus.COMPLETED,
         )
     ).first()
+    blocked_task = db.execute(
+        select(Task.id)
+        .join(SimulationTaskPath, SimulationTaskPath.task_id == Task.id)
+        .where(
+            SimulationTaskPath.simulation_id == simulation.id,
+            Task.sprint_id == sprint_id,
+            Task.status == TaskStatus.BLOCKED,
+        )
+    ).first()
+    if blocked_task and sprint.status != SprintStatus.COMPLETED:
+        sprint.status = SprintStatus.BLOCKED
+        db.add(sprint)
+    elif unfinished and sprint.status == SprintStatus.BLOCKED:
+        sprint.status = SprintStatus.ACTIVE
+        db.add(sprint)
     if unfinished is None and sprint.status != SprintStatus.COMPLETED:
         sprint.status = SprintStatus.COMPLETED
         db.add(sprint)
@@ -578,7 +593,7 @@ def calculate_sprint_progress(db: Session, simulation: Simulation, sprint_id: UU
 def _activate_sprint(db: Session, sprint_id: UUID) -> None:
     """Expose only the sprint containing the newly unlocked current task."""
     sprint = db.get(Sprint, sprint_id)
-    if sprint and sprint.status != SprintStatus.COMPLETED:
+    if sprint and sprint.status not in (SprintStatus.COMPLETED, SprintStatus.BLOCKED):
         sprint.status = SprintStatus.ACTIVE
         db.add(sprint)
 

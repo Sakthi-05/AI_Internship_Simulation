@@ -162,7 +162,7 @@ def repair_current_task(db: Session, simulation: Simulation) -> Optional[Task]:
     if candidate.status == TaskStatus.BACKLOG:
         candidate.status = TaskStatus.TODO
         db.add(candidate)
-    if task.sprint and task.sprint.status != SprintStatus.COMPLETED:
+    if task.sprint and task.sprint.status not in (SprintStatus.COMPLETED, SprintStatus.BLOCKED):
         task.sprint.status = SprintStatus.ACTIVE
         db.add(task.sprint)
     return task

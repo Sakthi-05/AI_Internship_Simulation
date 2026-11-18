@@ -112,6 +112,7 @@ export default function CodeEditor({ task, project, onCodeChange, onWorkChange, 
       const end = e.target.selectionEnd;
       const newCode = code.substring(0, start) + "  " + code.substring(end);
       setCode(newCode);
+      onCodeChange?.(newCode);
       setTimeout(() => {
         e.target.selectionStart = e.target.selectionEnd = start + 2;
       }, 0);
@@ -181,6 +182,9 @@ export default function CodeEditor({ task, project, onCodeChange, onWorkChange, 
             if (readOnly) return;
             const nextCode = e.target.value;
             setCode(nextCode);
+            // Keep the parent submission snapshot current in the same input
+            // event; the effect below remains responsible for draft loading.
+            onCodeChange?.(nextCode);
             setHasWork(Boolean(nextCode.trim() && nextCode !== fallbackCode));
           }}
           onKeyDown={handleKeyDown}

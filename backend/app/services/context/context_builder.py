@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+import hashlib
+import re
+from difflib import SequenceMatcher
 from typing import Any, Dict, List
 from uuid import UUID
 
@@ -15,6 +19,8 @@ from app.models.submission import Submission, SubmissionVersion
 from app.models.task import Task
 from app.services.criteria_version_service import criteria_identity, required_texts
 
+logger = logging.getLogger(__name__)
+
 
 def _review_criteria(db: Session, task: Task) -> List[str]:
     return required_texts(db, task)
@@ -22,6 +28,21 @@ def _review_criteria(db: Session, task: Task) -> List[str]:
 
 def _criteria_identity(db: Session, task: Task) -> Dict[str, Any]:
     return criteria_identity(db, task)
+
+
+def _similarity_ratio(left: str, right: str) -> float:
+    """Bounded normalized similarity used only to flag extra reviewer scrutiny."""
+    left = re.sub(r"\s+", " ", left).strip().casefold()
+    right = re.sub(r"\s+", " ", right).strip().casefold()
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    if abs(len(left) - len(right)) / max(len(left), len(right)) > 0.15:
+        return 0.0
+    # Keep comparison bounded for large documents; exact SHA matching above
+    # still detects large identical files and editor submissions.
+    return SequenceMatcher(None, left[:100_000], right[:100_000], autojunk=True).ratio()
 
 
 def build_project_context(db: Session, project: Project) -> Dict[str, Any]:
@@ -180,11 +201,7 @@ def metadata_evidence_text(metadata: Any) -> str:
         for key in _METADATA_EVIDENCE_KEYS:
             value = metadata.get(key)
             if isinstance(value, str) and value.strip():
-                # Architecture/design submissions can be long prose documents
-                # stored in the `code` field. Preserve substantially more than
-                # a short-answer budget so requirements later in the spec reach
-                # the evaluator intact.
-                parts.append(f"{key.upper()}:\n{value.strip()[:12000]}")
+                parts.append(f"{key.upper()}:\n{value}")
     return "\n\n".join(parts)
 
 
@@ -201,8 +218,13 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
         try:
             file_content = extract_all_submission_files(version.files, storage_service) or ""
         except Exception:
-            file_content = ""
+            logger.exception(
+                "Submission file extraction failed submission_id=%s version_id=%s",
+                version.submission_id, version.id,
+            )
+            raise
     metadata = version.version_metadata or {}
+    sprint = task.sprint
     criteria_snapshot = metadata.get("acceptance_criteria_snapshot")
     criteria_version = metadata.get("acceptance_criteria_version")
     if not isinstance(criteria_snapshot, list):
@@ -264,21 +286,86 @@ def build_review_context(db: Session, version: "SubmissionVersion") -> Dict[str,
         evidence_level = "thin"
     else:
         evidence_level = "none"
-    combined = "\n\n".join(part for part in (file_content.strip(), meta_text) if part)
+    combined = "\n\n".join(part for part in (file_content, meta_text) if part.strip())
     has_work_evidence = evidence_level in ("full", "thin")
     current_content = combined if combined else "No work evidence submitted."
-    if len(current_content) > 12000:
-        current_content = current_content[:12000] + "\n[truncated]"
+    metadata_code = metadata.get("code") if isinstance(metadata, dict) else None
+    normalized_source = re.sub(r"\s+", " ", str(metadata_code or "")).strip().casefold()
+    source_fingerprint = hashlib.sha256(normalized_source.encode("utf-8")).hexdigest() if normalized_source else None
+    submitted_file_checksums = {
+        str(item.get("checksum")) for item in (version.files or [])
+        if isinstance(item, dict) and item.get("checksum")
+    }
+    cross_task_matches = []
+    if source_fingerprint or submitted_file_checksums:
+        prior_versions = db.execute(
+            select(SubmissionVersion)
+            .join(Submission, Submission.id == SubmissionVersion.submission_id)
+            .where(
+                Submission.student_id == version.submission.student_id,
+                Submission.task_id != task.id,
+                SubmissionVersion.id != version.id,
+                SubmissionVersion.submitted_at.is_not(None),
+            )
+            .order_by(SubmissionVersion.submitted_at.desc())
+            .limit(100)
+        ).scalars().all()
+        for prior in prior_versions:
+            prior_metadata = prior.version_metadata or {}
+            prior_source = re.sub(r"\s+", " ", str(prior_metadata.get("code") or "")).strip().casefold()
+            same_source = bool(
+                prior_source and source_fingerprint
+                and hashlib.sha256(prior_source.encode("utf-8")).hexdigest() == source_fingerprint
+            )
+            similarity = _similarity_ratio(normalized_source, prior_source) if prior_source else 0.0
+            prior_checksums = {
+                str(item.get("checksum")) for item in (prior.files or [])
+                if isinstance(item, dict) and item.get("checksum")
+            }
+            if same_source or similarity >= 0.90 or (submitted_file_checksums & prior_checksums):
+                prior_task = prior.submission.task
+                cross_task_matches.append(
+                    f"task {prior_task.id} ({prior_task.title}) submission {prior.submission_id} similarity={similarity:.2f}"
+                )
+    if isinstance(metadata_code, str):
+        logger.info(
+            "Review source prepared submission_id=%s version_id=%s student_id=%s task_id=%s "
+            "source_chars=%d source_bytes=%d stored_source_chars=%d evaluator_input_chars=%d "
+            "evaluator_input_bytes=%d has_expected_end_marker=%s",
+            version.submission_id, version.id, version.submission.student_id, task.id,
+            len(metadata_code), len(metadata_code.encode("utf-8")), len(metadata_code),
+            len(current_content), len(current_content.encode("utf-8")),
+            (metadata.get("expected_end_marker") in metadata_code)
+            if metadata.get("expected_end_marker") else None,
+        )
 
     return {
+        "task_id": str(task.id),
+        "sprint_id": str(sprint.id) if sprint else None,
+        "sprint_goal": sprint.goal if sprint else "",
         "task_title": task.title,
-        "task_description": (task.description or "")[:500],
+        "task_description": task.description or "",
+        "task_instructions": (
+            [str(item) for item in (task.task_metadata or {}).get("instructions")]
+            if isinstance((task.task_metadata or {}).get("instructions"), list)
+            else ([str((task.task_metadata or {}).get("instructions"))]
+                  if (task.task_metadata or {}).get("instructions") else [])
+        ),
+        "project_title": project.title,
+        "project_objectives": list(project.objectives or []),
+        "expected_deliverables": list(
+            (task.task_metadata or {}).get("expected_deliverables")
+            or (task.task_metadata or {}).get("deliverables")
+            or project.deliverables
+            or []
+        ),
+        "cross_task_similarity": {"matches": cross_task_matches},
         # Review exactly the requirements visible when this version was
         # submitted. A later requirement change must not rewrite its rubric.
         "acceptance_criteria": (
-            [str(item).strip() for item in criteria_snapshot if str(item).strip()][:8]
+            [str(item).strip() for item in criteria_snapshot if str(item).strip()]
             if isinstance(criteria_snapshot, list)
-            else _review_criteria(db, task)[:8]
+            else _review_criteria(db, task)
         ),
         "acceptance_criteria_version": (
             criteria_version if isinstance(criteria_version, dict) else _criteria_identity(db, task)

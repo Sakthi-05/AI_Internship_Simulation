@@ -230,6 +230,13 @@ async def create_review(
             failed_provider = getattr(ai_service, "provider_name", "unconfigured")
             failed_model = getattr(ai_service, "model", None)
         review.raw_payload = {
+            "evaluation_metadata": {
+                "task_id": str(failed_task.id) if failed_task is not None else None,
+                "submission_id": str(failed_version.submission_id) if failed_version is not None else None,
+                "version_id": str(version_id),
+                "evaluator_version": "task-grounded-v2",
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            },
             "error": failure_category,
             "message": failure_message,
             "failure_type": type(exc.__cause__).__name__ if isinstance(exc, ReviewEvaluationError) and exc.__cause__ else type(exc).__name__,

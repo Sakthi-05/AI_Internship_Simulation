@@ -104,6 +104,25 @@ def test_project(db: Session, test_company):
     return project
 
 
+def test_static_sprint_and_task_generation_is_idempotent(db: Session, test_project, fresh_student):
+    from app.services.engines.sprint_engine import generate_sprints_and_tasks
+    from app.services.engines.task_engine import generate_tasks_for_project
+
+    first_sprints = generate_sprints_and_tasks(db, test_project)
+    second_sprints = generate_sprints_and_tasks(db, test_project)
+    assert [item.id for item in first_sprints] == [item.id for item in second_sprints]
+
+    first_tasks = generate_tasks_for_project(
+        db, test_project, test_project.role, test_project.technology_stack,
+        test_project.difficulty, fresh_student,
+    )
+    second_tasks = generate_tasks_for_project(
+        db, test_project, test_project.role, test_project.technology_stack,
+        test_project.difficulty, fresh_student,
+    )
+    assert [item.id for item in first_tasks] == [item.id for item in second_tasks]
+
+
 def test_dynamic_baseline_generation(db: Session, fresh_student, monkeypatch):
     """Test that baseline is generated dynamically based on student profile."""
     # Create student profile with specific skills

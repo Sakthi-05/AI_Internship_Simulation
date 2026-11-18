@@ -7,6 +7,7 @@ Task generation has been offloaded to the Task Engine.
 from datetime import datetime, timedelta, timezone
 from typing import List
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.enums import SprintStatus
@@ -30,6 +31,13 @@ def generate_sprints_and_tasks(db: Session, project: Project) -> List[Sprint]:
     Currently only responsible for generating and returning Sprints.
     Task generation belongs to the Task Engine.
     """
+    db.execute(select(Project).where(Project.id == project.id).with_for_update()).scalar_one()
+    existing = db.execute(
+        select(Sprint).where(Sprint.project_id == project.id).order_by(Sprint.sprint_number)
+    ).scalars().all()
+    if existing:
+        return existing
+
     n_sprints = 4
     module_chunks = _chunk_modules(project.modules, n_sprints)
 

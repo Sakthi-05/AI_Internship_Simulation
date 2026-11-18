@@ -5,6 +5,7 @@ guidance), the review prompt's specificity rules, and the end-to-end flow —
 submit → AI review requesting changes → tasks/current exposes the feedback.
 """
 import os
+import json
 
 import pytest
 from sqlalchemy import text
@@ -48,10 +49,14 @@ CHANGES_PAYLOAD = {
 class _DemandingReviewer(AIService):
     """Deterministic reviewer requesting changes with specific guidance."""
 
+    def __init__(self):
+        self.prompts = []
+
     async def generate_text(self, prompt, system_prompt=None):
         return "review"
 
     async def generate_json(self, prompt, system_prompt=None):
+        self.prompts.append(prompt)
         return dict(CHANGES_PAYLOAD)
 
 
@@ -186,6 +191,49 @@ def test_changes_requested_exposes_specific_feedback(client, auth_headers):
     )
     assert "pytest" in (feedback["testing_feedback"] or "")
     assert feedback["score"] == 62
+
+
+def test_long_editor_source_is_persisted_and_reviewed_without_truncation(client, auth_headers, db):
+    from app.models.submission import SubmissionVersion
+
+    data, sim_id, task_id = _start_task(client, auth_headers)
+    source = (
+        "# solution.py\n"
+        + "class InventoryService:\n    def create_item(self):\n        return True\n\n"
+        + "# long body\n" * 4000
+        + "def test_complete_submission_marker():\n    assert True\n\n"
+        + "# FINAL_SOLUTION_MARKER\n"
+    )
+    metadata = json.dumps({"code": source, "expected_end_marker": "# FINAL_SOLUTION_MARKER"})
+    submitted = client.post(
+        f"/api/simulations/{sim_id}/tasks/{task_id}/submit",
+        headers=auth_headers,
+        data={"metadata": metadata},
+    )
+    assert submitted.status_code == 201, submitted.text
+    version_id = submitted.json()["version_id"]
+    version = db.get(SubmissionVersion, version_id)
+    assert version is not None
+    assert version.version_metadata["code"] == source
+    assert len(version.version_metadata["code"]) == len(source)
+    assert version.version_metadata["code"].endswith("# FINAL_SOLUTION_MARKER\n")
+
+    reviewer = _DemandingReviewer()
+    app.dependency_overrides[get_ai_service] = lambda: reviewer
+    try:
+        reviewed = client.post(
+            f"/api/projects/{data['project_id']}/reviews/versions/{version_id}",
+            headers=auth_headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_ai_service, None)
+    assert reviewed.status_code == 201, reviewed.text
+    assert len(reviewer.prompts) == 1
+    prompt = reviewer.prompts[0]
+    assert source in prompt
+    assert "def test_complete_submission_marker():" in prompt
+    assert "# FINAL_SOLUTION_MARKER" in prompt
+    assert reviewed.json()["version_id"] == version_id
 
 
 def test_metadata_response_is_analyzed_not_ignored(client, auth_headers):

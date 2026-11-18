@@ -8,6 +8,7 @@ AI Internship Simulator platform.
 """
 from functools import lru_cache
 from typing import List
+from pydantic import Field
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -36,6 +37,9 @@ class Settings(BaseSettings):
 
     # File Upload
     MAX_UPLOAD_SIZE_MB: int = 50
+    # Dynamic simulations plan one core task per sprint and allow a bounded
+    # number of evidence-backed follow-up tasks within that sprint.
+    MAX_DYNAMIC_TASKS_PER_SPRINT: int = Field(default=3, gt=0)
     ALLOWED_UPLOAD_EXTENSIONS: str = ".py,.js,.ts,.jsx,.tsx,.json,.yaml,.yml,.md,.txt,.csv,.zip,.pdf,.png,.jpg,.jpeg,.gif,.html,.css,.sql,.sh,.dockerfile,.toml,.ini,.cfg,.conf,.xml,.java,.kt,.rb,.go,.rs,.cs,.php,.swift,.scala,.clj,.hs,.ml,.fs,.vb,.pl,.r,.m,.lua,.dart,.elm,.ex,.exs,.erl,.hrl,.pp,.tf,.tfvars,.hcl,.nomad,.helm,.k8s,.yaml"
     UPLOAD_DIRECTORY: str = "storage/submissions"
 

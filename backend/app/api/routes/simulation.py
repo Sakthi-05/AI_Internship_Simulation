@@ -1,4 +1,5 @@
 import uuid
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -41,6 +42,7 @@ from app.services.simulation.interaction_history_service import (
 )
 
 router = APIRouter(prefix="/api/simulations", tags=["Simulations"])
+logger = logging.getLogger(__name__)
 
 
 class CreateSimulationRequest(BaseModel):
@@ -314,6 +316,10 @@ async def start_simulation(
     Omit task_ids to enable dynamic task generation based on baseline/competency.
     """
     simulation = _get_owned_simulation(simulation_id, db, user)
+    simulation = db.execute(
+        select(Simulation).where(Simulation.id == simulation_id).with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
 
     if simulation.status != SimulationStatus.NOT_STARTED:
         raise HTTPException(
@@ -1290,6 +1296,24 @@ async def submit_simulation_task(
         )
     except (FileValidationError, ValueError) as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    source = meta_dict.get("code") if isinstance(meta_dict.get("code"), str) else ""
+    stored_metadata = result.get("metadata") or {}
+    stored_source = stored_metadata.get("code") if isinstance(stored_metadata.get("code"), str) else ""
+    logger.info(
+        "Submission source persisted submission_id=%s student_id=%s task_id=%s version_id=%s "
+        "source_chars=%d source_bytes=%d stored_source_chars=%d stored_source_bytes=%d "
+        "expected_end_marker_present=%s",
+        result.get("submission_id"), user.student_id, task.id, result.get("version_id"),
+        len(source), len(source.encode("utf-8")), len(stored_source), len(stored_source.encode("utf-8")),
+        (meta_dict.get("expected_end_marker") in stored_source)
+        if meta_dict.get("expected_end_marker") else None,
+    )
+    if source and stored_source != source:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Submission source failed integrity validation; no review was started.",
+        )
     
     if not task.deliverable_url and result.get("submission_id"):
         task.deliverable_url = f"submission://{result['submission_id']}"
@@ -1550,9 +1574,9 @@ async def acknowledge_simulation_event(
     """Student confirms they saw a requirement change. The manager then writes."""
     simulation = _get_owned_simulation(simulation_id, db, user)
     task, event = _owned_workflow_event(db, simulation, task_id, event_id)
-    from app.services.workplace_scenarios import WorkplaceScenarioError, acknowledge_requirement_change
+    from app.services.workplace_scenarios import WorkplaceScenarioError, acknowledge_scenario
     try:
-        payload = acknowledge_requirement_change(db, simulation, task, event, user.student_id)
+        payload = acknowledge_scenario(db, simulation, task, event, user.student_id)
     except WorkplaceScenarioError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     db.commit()
@@ -1611,8 +1635,47 @@ async def respond_to_simulation_event(
     if event.task_id != task_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Event does not belong to this task")
 
-    if event.event_type == WorkflowEventType.REQUIREMENT_CHANGE:
+    from app.services.workplace_scenarios import SCENARIO_EVENT_TYPES, _CATALOG_BY_KEY, _event_metadata
+    scenario_key = _event_metadata(event).get("scenario_key")
+    if (
+        event.event_type in SCENARIO_EVENT_TYPES.values()
+        or (scenario_key and scenario_key in _CATALOG_BY_KEY)
+    ):
         task = db.get(Task, task_id)
+        if event.event_type != WorkflowEventType.REQUIREMENT_CHANGE and scenario_key != "requirement_change":
+            from app.services.workplace_scenarios import WorkplaceScenarioError, record_scenario_reply
+            try:
+                result = record_scenario_reply(db, simulation, task, event, user.student_id, response)
+            except WorkplaceScenarioError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+            effective_key = scenario_key or event.event_type.value
+            record_interaction(
+                db,
+                simulation,
+                situation=event.message or event.title,
+                student_response=response,
+                decision=f"reply_{effective_key}",
+                interaction_type=f"{effective_key}_reply",
+                scenario_id=event.scenario_id,
+                task_id=task.id,
+                metadata={"event_id": str(event.id), "event_type": event.event_type.value, "scenario_key": effective_key},
+            )
+            db.commit()
+            from app.websockets.manager import manager as ws_manager
+            metadata = dict(event.metadata_json or {})
+            student_message_id = metadata.get("student_message_id")
+            if student_message_id:
+                student_msg = db.get(Message, uuid.UUID(student_message_id))
+                if student_msg is not None:
+                    await ws_manager.broadcast(str(simulation.company_id), "chat_message", {
+                        "channel": "team", "id": str(student_msg.id),
+                        "sender_type": student_msg.sender_type.value, "sender_id": student_msg.sender_id,
+                        "content": student_msg.content, "created_at": student_msg.created_at.isoformat(),
+                    })
+            await ws_manager.broadcast(str(simulation.company_id), "event", {"event_id": str(event.id)})
+            return result
+
         from app.services.workplace_scenarios import WorkplaceScenarioError, record_requirement_reply
         try:
             result = record_requirement_reply(db, simulation, task, event, user.student_id, response)

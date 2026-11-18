@@ -1,4 +1,4 @@
-"""Read-only, administrator-only monitoring APIs."""
+"""Administrator-only monitoring and management APIs."""
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -7,6 +7,15 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import CurrentUser, require_role
 from app.services.admin_service import dashboard, list_students, student_detail, student_activity, analytics, recent_activity
+from app.services.admin_company_service import (
+    CompanyTemplateCreate,
+    CompanyTemplateUpdate,
+    list_company_templates,
+    get_company_template,
+    create_company_template,
+    update_company_template,
+    deactivate_company_template,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["Admin monitoring"])
 AdminUser = Depends(require_role("admin", "administrator"))
@@ -60,3 +69,71 @@ def activity_route(limit: int = Query(default=30, ge=1, le=100), db: Session = D
 @router.get("/analytics")
 def analytics_route(db: Session = Depends(get_db), _admin: CurrentUser = AdminUser):
     return analytics(db)
+
+
+# ---------------------------------------------------------------------------
+# Company template management
+# ---------------------------------------------------------------------------
+
+
+@router.get("/companies")
+def list_templates_route(
+    q: Optional[str] = None,
+    company_type: Optional[str] = None,
+    include_inactive: bool = False,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    db: Session = Depends(get_db),
+    admin: CurrentUser = AdminUser,
+):
+    return list_company_templates(
+        db,
+        q=q,
+        company_type=company_type,
+        include_inactive=include_inactive,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/companies", status_code=201)
+def create_template_route(
+    body: CompanyTemplateCreate,
+    db: Session = Depends(get_db),
+    admin: CurrentUser = AdminUser,
+):
+    result = create_company_template(db, admin_id=admin.student_id, data=body)
+    db.commit()
+    return result
+
+
+@router.get("/companies/{template_id}")
+def get_template_route(
+    template_id: str,
+    db: Session = Depends(get_db),
+    _admin: CurrentUser = AdminUser,
+):
+    return get_company_template(db, template_id)
+
+
+@router.put("/companies/{template_id}")
+def update_template_route(
+    template_id: str,
+    body: CompanyTemplateUpdate,
+    db: Session = Depends(get_db),
+    _admin: CurrentUser = AdminUser,
+):
+    result = update_company_template(db, template_id=template_id, data=body)
+    db.commit()
+    return result
+
+
+@router.delete("/companies/{template_id}")
+def deactivate_template_route(
+    template_id: str,
+    db: Session = Depends(get_db),
+    _admin: CurrentUser = AdminUser,
+):
+    result = deactivate_company_template(db, template_id=template_id)
+    db.commit()
+    return result

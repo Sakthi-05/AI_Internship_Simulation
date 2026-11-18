@@ -105,6 +105,17 @@ export function useSubmitSimulationTask(simulationId) {
         files.forEach((file) => formData.append("files", file));
       }
       if (metadata) {
+        const source = typeof metadata.code === "string" ? metadata.code : "";
+        if (source) {
+          console.info("Submitting editor source", {
+            taskId,
+            sourceChars: source.length,
+            sourceBytes: new TextEncoder().encode(source).length,
+            expectedEndMarkerPresent: metadata.expected_end_marker
+              ? source.includes(metadata.expected_end_marker)
+              : null,
+          });
+        }
         formData.append("metadata", JSON.stringify(metadata));
       }
       // Let the browser attach the multipart boundary required by FastAPI.

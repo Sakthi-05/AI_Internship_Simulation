@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 import httpx
 
-from app.models.enums import ReviewResult, ReviewStatus, ReviewSeverity, SubmissionStatus, TaskStatus, EventType
+from app.models.enums import ReviewResult, ReviewStatus, ReviewSeverity, SubmissionStatus, TaskStatus, EventType, SprintStatus
 from app.models.manager import Manager
 from app.models.project import Project
 from app.models.project_state import ProjectState
@@ -32,6 +32,24 @@ logger = logging.getLogger(__name__)
 # 3 provider requests * 20s plus 1s and 2s backoff = 63s. Leave 5s for
 # parsing/persistence; the route's stale-claim lease is longer than this.
 REVIEW_PROVIDER_TIMEOUT_SECONDS = 68.0
+
+
+def _candidate_followup_sprints(current_sprint, project_sprints, objective_complete: bool):
+    """Return only the current open sprint or later planned sprints.
+
+    A completed final sprint intentionally yields no candidate; it must never
+    fall back to generating another task in itself.
+    """
+    if not objective_complete:
+        return [current_sprint] if current_sprint.status not in (SprintStatus.COMPLETED, SprintStatus.BLOCKED) else []
+    return sorted(
+        (
+            sprint for sprint in project_sprints
+            if sprint.sprint_number > current_sprint.sprint_number
+            and sprint.status not in (SprintStatus.COMPLETED, SprintStatus.BLOCKED)
+        ),
+        key=lambda sprint: sprint.sprint_number,
+    )
 
 
 class ReviewEvaluationError(RuntimeError):
@@ -91,7 +109,7 @@ def build_missing_evidence_payload(context: Dict[str, Any]) -> Dict[str, Any]:
     from app.schemas.review import AIReviewResponse
 
     task_title = str(context.get("task_title") or "this task")
-    criteria = [str(item) for item in (context.get("acceptance_criteria") or [])[:8] if str(item).strip()]
+    criteria = [str(item) for item in (context.get("acceptance_criteria") or []) if str(item).strip()]
     focus = "; ".join(criteria[:3]) if criteria else "each acceptance criterion"
     filenames = [str(name) for name in (context.get("attached_filenames") or []) if str(name).strip()]
     thin = context.get("evidence_level") == "thin"
@@ -168,7 +186,21 @@ def validate_provider_review(raw: Any, context: Dict[str, Any]) -> Dict[str, Any
     }
     if not isinstance(raw, dict) or set(raw) != required:
         raise ValueError("AI review fields do not match the required schema")
-    payload = AIReviewResponse.model_validate(raw, strict=True).model_dump()
+    # Accept legacy in-process provider doubles during rollout, but normalize
+    # every persisted evaluation to explicit per-requirement score/details.
+    normalized_raw = dict(raw) if isinstance(raw, dict) else raw
+    if isinstance(normalized_raw, dict) and isinstance(normalized_raw.get("acceptance_criteria"), list):
+        normalized_criteria = []
+        for entry in normalized_raw["acceptance_criteria"]:
+            if not isinstance(entry, dict):
+                normalized_criteria.append(entry)
+                continue
+            item = dict(entry)
+            item.setdefault("score", 100 if item.get("met") is True else 0)
+            item.setdefault("missing_elements", [] if item.get("met") is True else [str(item.get("evidence") or "Requirement is not demonstrated.")])
+            normalized_criteria.append(item)
+        normalized_raw["acceptance_criteria"] = normalized_criteria
+    payload = AIReviewResponse.model_validate(normalized_raw, strict=True).model_dump()
     if payload["score"] is None:
         raise ValueError("AI review must include a numeric score")
     for section in ("code_quality", "testing", "security", "performance"):
@@ -181,14 +213,28 @@ def validate_provider_review(raw: Any, context: Dict[str, Any]) -> Dict[str, Any
         ):
             raise ValueError(f"AI review must include scored, specific {section} feedback")
     expected = [str(item).strip() for item in context.get("acceptance_criteria", []) if str(item).strip()]
+    if not expected:
+        raise ValueError("Task has no persisted acceptance criteria; evaluation cannot approve without a task-specific rubric")
     criteria = payload["acceptance_criteria"]
-    if any(not isinstance(entry, dict) or set(entry) != {"criterion", "met", "evidence"} for entry in raw["acceptance_criteria"]):
+    if any(not isinstance(entry, dict) or set(entry) not in (
+        {"criterion", "met", "evidence"},
+        {"criterion", "met", "evidence", "score", "missing_elements"},
+    ) for entry in raw["acceptance_criteria"]):
         raise ValueError("AI review criterion entries do not match the required schema")
     actual = [entry["criterion"].strip() for entry in criteria]
     if len(actual) != len(set(actual)) or set(actual) != set(expected) or len(actual) != len(expected):
         raise ValueError("AI review must evaluate each task acceptance criterion exactly once")
+    for entry in criteria:
+        if entry["met"] and (entry["score"] < 80 or entry["missing_elements"]):
+            raise ValueError("A satisfied requirement must be strongly supported (not weakly supported) and have no missing elements")
+        if not entry["met"] and (entry["score"] >= 80 or not entry["missing_elements"]):
+            raise ValueError("An unmet requirement must score below 80 and name its missing elements")
     if payload["result"] == "approved" and expected and not all(entry["met"] for entry in criteria):
         raise ValueError("AI review cannot approve work without meeting every mandatory criterion")
+    if payload["result"] == "approved" and payload["score"] < 75:
+        raise ValueError("AI review cannot approve work below the 75-point acceptance threshold")
+    if payload["result"] == "approved" and any(entry["score"] < 80 for entry in criteria):
+        raise ValueError("AI review cannot approve work with an unmet or weakly supported task requirement")
     if payload["result"] != "approved" and not payload["required_changes"]:
         raise ValueError("Non-approved AI review must include actionable required corrections")
     for field in ("strengths", "issues", "required_changes"):
@@ -451,6 +497,17 @@ class ReviewService:
         )
 
         prompt = build_review_prompt(context)
+        source = str(context.get("submission_content") or "")
+        logger.info(
+            "Review evaluator input submission_id=%s version_id=%s student_id=%s task_id=%s "
+            "source_chars=%d source_bytes=%d evaluator_input_chars=%d evaluator_input_bytes=%d "
+            "prompt_chars=%d prompt_bytes=%d expected_end_marker_present=%s",
+            version.submission_id, version.id, version.submission.student_id, task.id,
+            len(source), len(source.encode("utf-8")), len(source), len(source.encode("utf-8")),
+            len(prompt), len(prompt.encode("utf-8")),
+            (version.version_metadata or {}).get("expected_end_marker") in source
+            if (version.version_metadata or {}).get("expected_end_marker") else None,
+        )
         system_prompt = (
             "You are a senior engineering reviewer. Return only the JSON review. No reasoning."
         )
@@ -514,6 +571,13 @@ class ReviewService:
                 raise ReviewEvaluationError("malformed_response", provider, model, exc) from exc
 
         review_payload["evaluation_source"] = evaluation_source
+        review_payload["evaluation_metadata"] = {
+            "task_id": str(task.id),
+            "submission_id": str(version.submission_id),
+            "version_id": str(version.id),
+            "evaluator_version": "task-grounded-v2",
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        }
         review_payload["acceptance_criteria_version"] = context.get("acceptance_criteria_version")
         if attempt_history:
             review_payload["attempt_history"] = attempt_history
@@ -707,18 +771,49 @@ class ReviewService:
             current_sprint = db.get(Sprint, task.sprint_id)
             if not prior_generated and not unfinished_successor and current_sprint:
                 sprint_progress = calculate_sprint_progress(db, simulation, current_sprint.id)
-                target_sprint = current_sprint
-                if sprint_progress["objective_complete"]:
-                    target_sprint = db.execute(
-                        select(Sprint)
-                        .where(
-                            Sprint.project_id == current_sprint.project_id,
-                            Sprint.sprint_number > current_sprint.sprint_number,
-                        )
-                        .order_by(Sprint.sprint_number.asc())
-                    ).scalars().first()
-                    if target_sprint:
-                        _activate_sprint(db, target_sprint.id)
+                unfinished_other_task = db.execute(
+                    select(SimulationTaskPath.id)
+                    .join(Task, Task.id == SimulationTaskPath.task_id)
+                    .where(
+                        SimulationTaskPath.simulation_id == simulation.id,
+                        Task.sprint_id == current_sprint.id,
+                        Task.id != task.id,
+                        Task.status != TaskStatus.COMPLETED,
+                    )
+                ).first()
+                # Reviews precede manager completion. Plan the next sprint
+                # once the approved task is the only remaining sprint task.
+                objective_complete_after_approval = (
+                    sprint_progress["objective_complete"] or unfinished_other_task is None
+                )
+                from app.core.config import settings
+                project_sprints = db.execute(
+                    select(Sprint)
+                    .where(Sprint.project_id == current_sprint.project_id)
+                    .order_by(Sprint.sprint_number.asc())
+                ).scalars().all()
+                candidate_sprints = _candidate_followup_sprints(
+                    current_sprint, project_sprints, objective_complete_after_approval
+                )
+                target_sprint = None
+                for candidate in candidate_sprints:
+                    candidate_tasks = db.execute(
+                        select(Task).where(Task.sprint_id == candidate.id)
+                    ).scalars().all()
+                    dynamic_count = sum(
+                        1 for candidate_task in candidate_tasks
+                        if (candidate_task.task_metadata or {}).get("dynamic_generation") is True
+                        and (candidate_task.task_metadata or {}).get("generation_simulation_id") == str(simulation.id)
+                    )
+                    configured_limit = int(
+                        (candidate.sprint_metadata or {}).get("dynamic_task_limit")
+                        or settings.MAX_DYNAMIC_TASKS_PER_SPRINT
+                    )
+                    if candidate.status not in (SprintStatus.COMPLETED, SprintStatus.BLOCKED) and dynamic_count < configured_limit:
+                        target_sprint = candidate
+                        break
+                if target_sprint and target_sprint.id != current_sprint.id:
+                    _activate_sprint(db, target_sprint.id)
                 if target_sprint:
                     try:
                         competency_focus, recorded_focus = await self._competency_task_focus(
@@ -808,16 +903,37 @@ class ReviewService:
         ).scalars().first()
         if prior_manager_review is not None:
             decision = prior_manager_review.payload_snapshot or {}
+            manager_result = prior_manager_review.new_result or ai_review.result
+            next_task = None
+            # A previous manager-review request may have committed approval but
+            # failed while progressing (for example, transient task generation
+            # failure). Replaying the structured decision must also retry
+            # progression; progress_to_next_task is serialized and idempotent.
+            if manager_result == ReviewResult.APPROVED and task.status == TaskStatus.COMPLETED:
+                from app.models.simulation import Simulation
+                from app.services.simulation.progression_service import progress_to_next_task
+                simulation = db.execute(
+                    select(Simulation).where(Simulation.current_task_id == task.id)
+                ).scalar_one_or_none()
+                if simulation is not None:
+                    next_task = await progress_to_next_task(db, simulation, task, "ai_manager")
+                    db.commit()
             return {
                 "review_id": str(ai_review.id),
                 "version_id": str(version.id),
                 "project_id": str(project.id),
                 "ai_result": prior_manager_review.previous_result.value if prior_manager_review.previous_result else ai_review.result.value,
-                "manager_result": prior_manager_review.new_result.value if prior_manager_review.new_result else ai_review.result.value,
+                "manager_result": manager_result.value,
                 "manager_severity": decision.get("severity", ai_review.severity.value),
                 "manager_summary": decision.get("summary", ai_review.summary),
                 "manager_feedback": decision.get("feedback", ""),
                 "final_task_status": task.status.value,
+                "next_task": ({
+                    "task_id": str(next_task.id),
+                    "title": next_task.title,
+                    "description": next_task.description,
+                    "status": next_task.status.value,
+                } if next_task else None),
             }
 
         if version.version_number != version.submission.current_version:
@@ -892,7 +1008,11 @@ class ReviewService:
                 select(Simulation).where(Simulation.current_task_id == task.id)
             ).scalar_one_or_none()
             if simulation:
-                await progress_to_next_task(db, simulation, task, "ai_manager")
+                next_task = await progress_to_next_task(db, simulation, task, "ai_manager")
+            else:
+                next_task = None
+        else:
+            next_task = None
 
         # Create notifications, events, activity logs for manager review completion
         company_id = project.company_id
@@ -965,6 +1085,12 @@ class ReviewService:
             "manager_summary": manager_decision["summary"],
             "manager_feedback": manager_decision.get("feedback", ""),
             "final_task_status": task.status.value,
+            "next_task": ({
+                "task_id": str(next_task.id),
+                "title": next_task.title,
+                "description": next_task.description,
+                "status": next_task.status.value,
+            } if next_task else None),
         }
 
     def _coerce_review_payload(self, raw: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:

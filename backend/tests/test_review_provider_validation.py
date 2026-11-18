@@ -15,7 +15,9 @@ from app.services.ai.review_service import (
     classify_provider_failure,
     validate_provider_review,
 )
-from app.services.context.context_builder import metadata_evidence_text
+from app.services.ai.review_service import _candidate_followup_sprints
+from app.models.enums import SprintStatus
+from app.services.context.context_builder import metadata_evidence_text, _similarity_ratio
 
 
 def _valid_payload(criteria):
@@ -28,7 +30,13 @@ def _valid_payload(criteria):
         "issues": ["The empty input path is not handled."],
         "required_changes": ["Handle empty input in parse_request and add a regression test."],
         "acceptance_criteria": [
-            {"criterion": item, "met": False, "evidence": "The submitted code does not implement this behavior."}
+            {
+                "criterion": item,
+                "met": False,
+                "evidence": "The submitted code does not implement this behavior.",
+                "score": 0,
+                "missing_elements": ["The required behavior is absent."],
+            }
             for item in criteria
         ],
         "code_quality": {"score": 75, "feedback": "The parsing function is clear but misses validation."},
@@ -49,6 +57,24 @@ def test_provider_result_is_preserved_after_valid_schema_and_rubric_validation()
     assert result["score"] == 68
     assert result["result"] == "changes_required"
     assert [item["criterion"] for item in result["acceptance_criteria"]] == criteria
+    assert result["acceptance_criteria"][0]["score"] == 0
+    assert result["acceptance_criteria"][0]["missing_elements"]
+
+
+def test_task_specific_complete_submission_can_pass_with_requirement_evidence():
+    criteria = ["Implement ERP inventory reconciliation"]
+    payload = _valid_payload(criteria)
+    payload.update(result="approved", score=92, required_changes=[])
+    payload["acceptance_criteria"] = [{
+        "criterion": criteria[0],
+        "met": True,
+        "evidence": "The reconciliation section maps receipt records to warehouse counts and describes mismatch resolution.",
+        "score": 95,
+        "missing_elements": [],
+    }]
+    validated = validate_provider_review(payload, {"acceptance_criteria": criteria})
+    assert validated["result"] == "approved"
+    assert validated["acceptance_criteria"][0]["score"] == 95
 
 
 @pytest.mark.parametrize("mutation", [
@@ -281,6 +307,83 @@ def test_review_prompt_does_not_include_conversation_or_previous_review_history(
     assert "This should not be sent as history" not in prompt
 
 
+def test_review_prompt_is_grounded_in_complete_task_scope_and_similarity_alert():
+    prompt = build_review_prompt({
+        "task_id": "task-erp-2",
+        "task_title": "Design ERP inventory reconciliation",
+        "task_description": "Full instructions " * 80,
+        "sprint_id": "sprint-1",
+        "sprint_goal": "Reconcile receiving and warehouse inventory",
+        "project_title": "ERP modernization",
+        "project_objectives": ["Track inventory changes"],
+        "expected_deliverables": ["Reconciliation architecture", "Exception workflow"],
+        "task_instructions": ["Explain transaction boundaries"],
+        "cross_task_similarity": {"matches": ["task unrelated (Architecture) similarity=0.99"]},
+        "acceptance_criteria": ["Cover receiving", "Cover reconciliation", "Cover exception reporting"] * 4,
+        "submission_content": "A reusable architecture document.",
+    })
+    assert "TASK ID: task-erp-2" in prompt
+    assert "Reconcile receiving and warehouse inventory" in prompt
+    assert "Exception workflow" in prompt
+    assert "Explain transaction boundaries" in prompt
+    assert "Full instructions " * 80 in prompt
+    assert prompt.count("Cover receiving") == 4
+    assert "not automatic rejection" in prompt
+
+
+def test_substantial_submission_similarity_is_flagged_without_requiring_exact_identity():
+    original = "Architecture: " + ("inventory reconciliation transaction boundaries and exception handling. " * 35)
+    revised = original + "Task-specific receiving workflow is added."
+    unrelated = "A different plan for user authentication and session management."
+    assert _similarity_ratio(original, revised) >= 0.90
+    assert _similarity_ratio(original, unrelated) < 0.90
+
+
+def test_review_cannot_approve_below_threshold_or_with_weak_requirement_score():
+    criteria = ["Implement ERP reconciliation"]
+    payload = _valid_payload(criteria)
+    payload["result"] = "approved"
+    payload["score"] = 74
+    payload["acceptance_criteria"] = [{
+        "criterion": criteria[0], "met": True, "evidence": "Relevant content exists.",
+        "score": 100, "missing_elements": [],
+    }]
+    with pytest.raises(ValueError, match="75-point"):
+        validate_provider_review(payload, {"acceptance_criteria": criteria})
+
+    payload["score"] = 90
+    payload["acceptance_criteria"][0]["score"] = 60
+    with pytest.raises(ValueError, match="weakly supported"):
+        validate_provider_review(payload, {"acceptance_criteria": criteria})
+
+
+def test_review_fails_closed_when_task_has_no_criteria():
+    with pytest.raises(ValueError, match="no persisted acceptance criteria"):
+        validate_provider_review(_valid_payload([]), {"acceptance_criteria": []})
+
+
+def test_review_cannot_reuse_another_tasks_criteria():
+    payload = _valid_payload(["Implement ERP reconciliation"])
+    with pytest.raises(ValueError, match="each task acceptance criterion exactly once"):
+        validate_provider_review(payload, {"acceptance_criteria": ["Implement identity provider SSO"]})
+
+
+def test_completed_final_sprint_has_no_followup_candidate():
+    class Sprint:
+        def __init__(self, number, status):
+            self.sprint_number = number
+            self.status = status
+
+    final = Sprint(4, SprintStatus.ACTIVE)
+    assert _candidate_followup_sprints(final, [final], objective_complete=True) == []
+    assert _candidate_followup_sprints(final, [final], objective_complete=False) == [final]
+    earlier = Sprint(2, SprintStatus.COMPLETED)
+    next_sprint = Sprint(3, SprintStatus.PLANNED)
+    assert _candidate_followup_sprints(
+        earlier, [earlier, next_sprint], objective_complete=True
+    ) == [next_sprint]
+
+
 def test_long_architecture_spec_and_sql_comment_format_are_preserved_for_evaluation():
     architecture = "```sql\n/*\n" + ("ARCHITECTURE DETAIL; " * 350) + "\n*/\n```"
     evidence = metadata_evidence_text({"code": architecture})
@@ -295,3 +398,15 @@ def test_long_architecture_spec_and_sql_comment_format_are_preserved_for_evaluat
     assert architecture in prompt
     assert "SQL block comments) are valid design-document formats" in prompt
     assert "do not require executable SQL or source code" in prompt
+
+
+def test_evaluator_prompt_preserves_full_source_beyond_legacy_twelve_thousand_character_limit():
+    source = "# ERP architecture\n" + ("Inventory transaction and reconciliation detail.\n" * 500) + "# FINAL_ARCHITECTURE_SECTION\n"
+    prompt = build_review_prompt({
+        "task_title": "ERP inventory reconciliation architecture",
+        "acceptance_criteria": ["Define the reconciliation workflow"],
+        "submission_content": source,
+    })
+    assert len(source) > 12_000
+    assert source in prompt
+    assert prompt.rstrip().endswith("- Output ONLY valid JSON, no markdown, no reasoning")

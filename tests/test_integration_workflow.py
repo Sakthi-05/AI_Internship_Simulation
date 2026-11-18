@@ -117,6 +117,21 @@ def test_complete_submission_workflow():
         if manager_review["manager_result"] == "approved":
             # 7. Task should be COMPLETED
             assert manager_review["final_task_status"] == "completed"
+            # Approval returns the task selected by the progression service so
+            # the workspace can immediately synchronize its active task.
+            next_task = manager_review.get("next_task")
+            if next_task:
+                assert next_task["task_id"]
+                assert next_task["status"] in {"todo", "in_progress"}
+
+            # Retrying the same manager decision is idempotent and remains
+            # available after approval without requiring another submission.
+            retry = client.post(
+                f"/api/projects/{project_id}/reviews/versions/{version_id}/manager-review",
+                headers=headers,
+            )
+            assert retry.status_code == 201, f"Manager review retry failed: {retry.text}"
+            assert retry.json()["manager_result"] == "approved"
         else:
             # Changes required - would need to resubmit
             pytest.skip("Manager requested changes, but AI approved")

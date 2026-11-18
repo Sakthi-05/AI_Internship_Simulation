@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "../api/client";
+import CompanyTemplates from "../components/CompanyTemplates";
 
 const emptyDashboard = { total_students: 0, active_students: 0, baseline_completed: 0, simulations_in_progress: 0, simulations_completed: 0, average_readiness: null, average_competency: null, assessments_completed: 0, simulations_count: 0, feedback_reports: 0, students_needing_attention: 0 };
 const date = (value) => value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—";
@@ -23,8 +24,8 @@ function CompetencyBars({ baseline, current }) {
   })}</div>;
 }
 
-function AssessmentBank() {
-  const [open, setOpen] = useState(false); const [questions, setQuestions] = useState([]);
+function AssessmentBank({ defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen); const [questions, setQuestions] = useState([]);
   const [prompt, setPrompt] = useState(""); const [competency, setCompetency] = useState("technical_knowledge"); const [error, setError] = useState("");
   const load = async () => { try { const response = await apiClient.get("/api/admin/questions"); setQuestions(response.data.questions || []); } catch (err) { setError(err.message); } };
   useEffect(() => { if (open) load(); }, [open]);
@@ -68,6 +69,7 @@ function StudentDetail({ studentId, onClose }) {
 }
 
 export default function Admin() {
+  const [activeAdminTab, setActiveAdminTab] = useState("companies");
   const [dashboard, setDashboard] = useState(emptyDashboard); const [analytics, setAnalytics] = useState(null); const [activity, setActivity] = useState([]);
   const [students, setStudents] = useState([]); const [pagination, setPagination] = useState({ page: 1, page_size: 25, total: 0, pages: 0 }); const [activityLimit, setActivityLimit] = useState(12);
   const [filters, setFilters] = useState({ q: "", baseline_status: "", internship_status: "", simulation_status: "", difficulty: "", activity_status: "", readiness_min: "", readiness_max: "", sort: "registration_date", order: "desc" });
@@ -107,7 +109,36 @@ export default function Admin() {
     </section>
 
     <section className="card p-5"><div className="flex items-center justify-between"><div><p className="eyebrow">All students</p><h2 className="mt-1 font-display text-lg font-semibold">Recent system activity</h2></div><button className="btn-ghost" onClick={() => setActivityLimit((n) => n === 12 ? 100 : 12)}>{activityLimit === 12 ? "View all activity" : "Show recent"}</button></div><div className="mt-4 space-y-2">{activity.length ? activity.map((item, i) => <button key={`${item.timestamp}-${i}`} onClick={() => setSelected(item.student_id)} className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl border border-white/[0.05] bg-white/[0.02] p-3 text-left hover:border-brand-400/30"><span><span className="font-medium">{item.student_name}</span><span className="ml-2 text-sm text-text-muted">{item.activity}</span>{item.detail && <span className="ml-2 text-xs text-text-faint">· {item.detail}</span>}</span><span className="font-mono text-xs text-text-faint">{item.score != null ? `${percent(item.score)} · ` : ""}{date(item.timestamp)}</span></button>) : <p className="text-sm text-text-faint">No recorded events yet.</p>}</div></section>
-    <AssessmentBank />
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.06] pb-3">
+        <span className="eyebrow mr-2">Management Tools:</span>
+        <button
+          type="button"
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+            activeAdminTab === "companies"
+              ? "bg-brand-500 text-white shadow-sm"
+              : "bg-white/[0.03] text-text-muted hover:bg-white/[0.06] hover:text-text"
+          }`}
+          onClick={() => setActiveAdminTab("companies")}
+        >
+          Company Templates
+        </button>
+        <button
+          type="button"
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+            activeAdminTab === "questions"
+              ? "bg-brand-500 text-white shadow-sm"
+              : "bg-white/[0.03] text-text-muted hover:bg-white/[0.06] hover:text-text"
+          }`}
+          onClick={() => setActiveAdminTab("questions")}
+        >
+          Assessment Bank
+        </button>
+      </div>
+
+      {activeAdminTab === "companies" && <CompanyTemplates defaultOpen={true} />}
+      {activeAdminTab === "questions" && <AssessmentBank defaultOpen={true} />}
+    </section>
     {selected && <StudentDetail studentId={selected} onClose={() => setSelected(null)} />}
   </main>;
 }

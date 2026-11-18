@@ -26,3 +26,4 @@ from app.models.assessment import (  # noqa: F401
 from app.models.technical_domain_rating import StudentTechnicalTechnologyRating  # noqa: F401
 from app.models.soft_skill import SoftSkillEvidence  # noqa: F401
 from app.models.criteria_version import AcceptanceCriteriaVersion  # noqa: F401
+from app.models.company_template import CompanyTemplate  # noqa: F401

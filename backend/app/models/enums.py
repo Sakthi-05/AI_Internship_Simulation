@@ -63,6 +63,7 @@ class SprintStatus(str, enum.Enum):
     PLANNED = "planned"
     ACTIVE = "active"
     COMPLETED = "completed"
+    BLOCKED = "blocked"
 
 
 # ==========================================================
@@ -312,3 +313,8 @@ class WorkflowEventType(str, enum.Enum):
     STAKEHOLDER_MESSAGE = "stakeholder_message"
     BUG_REPORT = "bug_report"
     PRIORITY_CHANGE = "priority_change"
+    COLLABORATION_REQUEST = "collaboration_request"
+    SCHEDULE_CONFLICT = "schedule_conflict"
+    COMPETING_WORK = "competing_work"
+    UNOWNED_ISSUE = "unowned_issue"
+    REVIEW_FEEDBACK = "review_feedback"

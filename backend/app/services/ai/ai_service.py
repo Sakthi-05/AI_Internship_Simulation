@@ -118,9 +118,11 @@ AI_REVIEW_RESPONSE_SCHEMA: Dict[str, Any] = {
                     "criterion": {"type": "STRING"},
                     "met": {"type": "BOOLEAN"},
                     "evidence": {"type": "STRING"},
+                    "score": {"type": "INTEGER", "minimum": 0, "maximum": 100},
+                    "missing_elements": {"type": "ARRAY", "items": {"type": "STRING"}},
                 },
-                "required": ["criterion", "met", "evidence"],
-                "propertyOrdering": ["criterion", "met", "evidence"],
+                "required": ["criterion", "met", "evidence", "score", "missing_elements"],
+                "propertyOrdering": ["criterion", "met", "evidence", "score", "missing_elements"],
             },
         },
         **{

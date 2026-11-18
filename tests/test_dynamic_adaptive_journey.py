@@ -85,7 +85,7 @@ def test_baseline_completion_calculates_level(db, mock_student, baseline_evaluat
 
 
 @pytest.mark.asyncio
-async def test_dynamic_task_generation_and_adaptation(db, mock_student):
+async def test_dynamic_task_generation_and_adaptation(db, mock_student, monkeypatch):
     """Verify dynamic next task generation considers previous task work and sprint objective."""
     student_id = mock_student["student_id"]
     
@@ -129,12 +129,17 @@ async def test_dynamic_task_generation_and_adaptation(db, mock_student):
     db.flush()
 
     # Generate Task 1 dynamically
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "MAX_DYNAMIC_TASKS_PER_SPRINT", 2)
     task1 = await generate_dynamic_task(db, simulation, sprint, student_id, previous_task=None)
     assert task1.id is not None
     assert task1.sprint_id == sprint.id
     assert task1.task_metadata is not None
     assert "hints" in task1.task_metadata
     assert "recommended_team_role" in task1.task_metadata
+    db.add(SimulationTaskPath(simulation_id=simulation.id, task_id=task1.id, sequence=1, status=TaskStatus.TODO))
+    db.flush()
+    assert (await generate_dynamic_task(db, simulation, sprint, student_id, previous_task=None)).id == task1.id
 
     # Complete Task 1 and generate Task 2
     task1.status = TaskStatus.COMPLETED
@@ -145,6 +150,16 @@ async def test_dynamic_task_generation_and_adaptation(db, mock_student):
     assert task2.id is not None
     assert task2.id != task1.id
     assert task2.task_metadata["previous_task_id"] == str(task1.id)
+    db.add(SimulationTaskPath(simulation_id=simulation.id, task_id=task2.id, sequence=2, status=TaskStatus.TODO))
+    db.flush()
+    assert (await generate_dynamic_task(db, simulation, sprint, student_id, previous_task=task1)).id == task2.id
+
+    from app.services.generators.dynamic_task_generator import DynamicTaskLimitReached
+    task2.status = TaskStatus.COMPLETED
+    db.add(task2)
+    db.flush()
+    with pytest.raises(DynamicTaskLimitReached):
+        await generate_dynamic_task(db, simulation, sprint, student_id, previous_task=task2)
     
     # Dependency check
     deps = db.execute(select(TaskDependency).where(TaskDependency.task_id == task2.id)).scalars().all()

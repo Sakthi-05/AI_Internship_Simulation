@@ -12,6 +12,8 @@ class AcceptanceCriterionReview(BaseModel):
     criterion: str = Field(..., min_length=1)
     met: bool
     evidence: str = Field(default="", description="Evidence from submission supporting the decision")
+    score: int = Field(default=0, ge=0, le=100)
+    missing_elements: List[str] = Field(default_factory=list)
 
 
 class CodeQualityReview(BaseModel):
