@@ -913,9 +913,24 @@ class ReviewService:
                 from app.models.simulation import Simulation
                 from app.services.simulation.progression_service import progress_to_next_task
                 simulation = db.execute(
-                    select(Simulation).where(Simulation.current_task_id == task.id)
-                ).scalar_one_or_none()
+                    select(Simulation).where(
+                        Simulation.project_id == project.id,
+                        Simulation.student_id == version.submission.student_id,
+                    )
+                ).scalars().first()
                 if simulation is not None:
+                    from app.models.task_path import SimulationTaskPath
+                    path_entry = db.execute(
+                        select(SimulationTaskPath).where(
+                            SimulationTaskPath.simulation_id == simulation.id,
+                            SimulationTaskPath.task_id == task.id,
+                        )
+                    ).scalar_one_or_none()
+                    if path_entry and path_entry.status != TaskStatus.COMPLETED:
+                        path_entry.status = TaskStatus.COMPLETED
+                        path_entry.completed_at = task.completed_at or datetime.now(timezone.utc)
+                        db.add(path_entry)
+                        db.flush()
                     next_task = await progress_to_next_task(db, simulation, task, "ai_manager")
                     db.commit()
             return {
@@ -1005,9 +1020,24 @@ class ReviewService:
             from app.models.simulation import Simulation
             from app.services.simulation.progression_service import progress_to_next_task
             simulation = db.execute(
-                select(Simulation).where(Simulation.current_task_id == task.id)
-            ).scalar_one_or_none()
+                select(Simulation).where(
+                    Simulation.project_id == project.id,
+                    Simulation.student_id == version.submission.student_id,
+                )
+            ).scalars().first()
             if simulation:
+                from app.models.task_path import SimulationTaskPath
+                path_entry = db.execute(
+                    select(SimulationTaskPath).where(
+                        SimulationTaskPath.simulation_id == simulation.id,
+                        SimulationTaskPath.task_id == task.id,
+                    )
+                ).scalar_one_or_none()
+                if path_entry and path_entry.status != TaskStatus.COMPLETED:
+                    path_entry.status = TaskStatus.COMPLETED
+                    path_entry.completed_at = task.completed_at or datetime.now(timezone.utc)
+                    db.add(path_entry)
+                    db.flush()
                 next_task = await progress_to_next_task(db, simulation, task, "ai_manager")
             else:
                 next_task = None

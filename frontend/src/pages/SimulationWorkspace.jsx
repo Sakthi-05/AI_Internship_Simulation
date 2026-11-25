@@ -64,6 +64,7 @@ export default function SimulationWorkspace() {
   const [showSubmissionModal, setShowSubmissionModal] = useState(false);
   const [actionError, setActionError] = useState("");
   const [simulationCompleted, setSimulationCompleted] = useState(false);
+  const [isStartingSimulation, setIsStartingSimulation] = useState(false);
 
   // Check if simulation is completed
   useEffect(() => {
@@ -80,9 +81,17 @@ export default function SimulationWorkspace() {
       return;
     }
     setActionError("");
+    setIsStartingSimulation(true);
     try {
-      await apiClient.post(`/api/simulations/${idToUse}/start`);
-      setSimulation(prev => ({ ...prev, id: idToUse, status: "in_progress" }));
+      const res = await apiClient.post(`/api/simulations/${idToUse}/start`);
+      const updatedSim = res.data;
+      setSimulation(prev => ({
+        ...prev,
+        id: idToUse,
+        status: "in_progress",
+        currentTaskId: updatedSim?.current_task_id || prev?.currentTaskId,
+        total_tasks: updatedSim?.total_tasks || prev?.total_tasks,
+      }));
       await invalidateWorkspaceQueries(queryClient);
       // Invalidate all relevant queries so the workspace fetches fresh data
       queryClient.invalidateQueries({ queryKey: ["simulation", idToUse] });
@@ -93,7 +102,10 @@ export default function SimulationWorkspace() {
       // Navigate to the simulation workspace to show the current task
       navigate("/simulation");
     } catch (error) {
-      setActionError(error.message || "The simulation could not be started. Retry when the service is available.");
+      const detail = error?.response?.data?.detail;
+      setActionError(typeof detail === "string" ? detail : error.message || "The simulation could not be started. Retry when the service is available.");
+    } finally {
+      setIsStartingSimulation(false);
     }
   };
 
@@ -261,7 +273,7 @@ export default function SimulationWorkspace() {
 
   // If no simulation selected, show selection screen
   if (!simulationId) {
-    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} />;
+    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} isStarting={isStartingSimulation} error={actionError} />;
   }
 
   // Show loading while fetching
@@ -317,7 +329,7 @@ export default function SimulationWorkspace() {
 
   // Simulation not yet started — show the start screen
   if (sim?.status === "not_started") {
-    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} error={actionError} />;
+    return <SimulationSelectionScreen onStartSimulation={handleStartSimulation} isStarting={isStartingSimulation} error={actionError} />;
   }
 
   // No active task — determine the correct state from backend data
@@ -368,12 +380,22 @@ export default function SimulationWorkspace() {
     if (sim?.status === "in_progress" && hasRemainingTasks) {
       return (
         <div className="mx-auto max-w-6xl p-6 text-center">
-          <div className="card mx-auto max-w-md space-y-3 p-8">
+          <div className="card mx-auto max-w-md space-y-4 p-8">
             <div className="relative mx-auto h-10 w-10">
               <div className="absolute inset-0 rounded-full border-2 border-brand-400/20" />
               <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-brand-300 animate-spin" style={{ animationDuration: "0.9s" }} />
             </div>
             <div className="animate-pulse-soft text-sm text-text-faint">Loading next task...</div>
+            <button
+              type="button"
+              className="btn-ghost text-xs text-brand-300 hover:text-brand-200"
+              onClick={() => {
+                queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
+                queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
+              }}
+            >
+              ↻ Refresh Task State
+            </button>
           </div>
         </div>
       );
@@ -409,12 +431,22 @@ export default function SimulationWorkspace() {
 
     return (
       <div className="mx-auto max-w-6xl p-6 text-center">
-        <div className="card mx-auto max-w-md space-y-3 p-8">
+        <div className="card mx-auto max-w-md space-y-4 p-8">
           <div className="relative mx-auto h-10 w-10">
             <div className="absolute inset-0 rounded-full border-2 border-brand-400/20" />
             <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-brand-300 animate-spin" style={{ animationDuration: "0.9s" }} />
           </div>
           <div className="animate-pulse-soft text-sm text-text-faint">Loading next task...</div>
+          <button
+            type="button"
+            className="btn-ghost text-xs text-brand-300 hover:text-brand-200"
+            onClick={() => {
+              queryClient.invalidateQueries({ queryKey: ["currentTask", simulationId] });
+              queryClient.invalidateQueries({ queryKey: ["simulation", simulationId] });
+            }}
+          >
+            ↻ Refresh Task State
+          </button>
         </div>
       </div>
     );
@@ -497,7 +529,7 @@ export default function SimulationWorkspace() {
 /**
  * Simulation selection/start screen
  */
-function SimulationSelectionScreen({ onStartSimulation, error }) {
+function SimulationSelectionScreen({ onStartSimulation, isStarting = false, error }) {
   const { simulation, setSimulation } = useSimulation();
   const { auth } = useAuth();
   const createSimulation = useCreateSimulation();
@@ -544,7 +576,7 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
       ["💼 Role", simulation.role || "Internship"],
       ["🎯 Difficulty", simulation.difficulty || "—"],
       ["📅 Duration", simulation.duration_weeks ? `${simulation.duration_weeks} weeks` : "—"],
-      ["🧩 Tasks", simulation.total_tasks ?? "—"],
+      ["🧩 Tasks", simulation.total_tasks ?? 1],
     ];
     return (
       <div className="mx-auto max-w-3xl p-6 text-center">
@@ -586,9 +618,16 @@ function SimulationSelectionScreen({ onStartSimulation, error }) {
               whileTap={{ scale: 0.985 }}
               className="btn-primary w-full py-3.5 text-sm"
               onClick={() => onStartSimulation(simulation.id)}
-              disabled={simulation.status !== "not_started"}
+              disabled={isStarting || (simulation.status && simulation.status !== "not_started")}
             >
-              ▶ Start Internship Simulation
+              {isStarting ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  Starting simulation…
+                </span>
+              ) : (
+                "▶ Start Internship Simulation"
+              )}
             </motion.button>
             <div className="mt-4 flex items-center justify-center gap-4 text-[11px] text-text-faint">
               <span>⚡ Live AI manager</span><span>👥 AI teammates</span><span>📊 Real-time analytics</span>

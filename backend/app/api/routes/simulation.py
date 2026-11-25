@@ -331,6 +331,8 @@ async def start_simulation(
     simulation.status = SimulationStatus.IN_PROGRESS
     simulation.started_at = datetime.now(timezone.utc)
     simulation.progress = 0
+    db.add(simulation)
+    db.flush()
 
     # Find the first scenario (by sequence) — lenient if missing
     first_scenario = db.execute(
@@ -344,10 +346,27 @@ async def start_simulation(
         simulation.current_scenario_id = first_scenario.id
         db.add(first_scenario)
 
-    # DYNAMIC FIRST TASK GENERATION
-    # If task_ids are explicitly provided, use the canonical path (legacy mode)
-    # Otherwise, generate the first task dynamically based on baseline/competency
-    if body.task_ids:
+    from app.models.task_path import SimulationTaskPath
+    existing_paths = db.execute(
+        select(SimulationTaskPath)
+        .where(SimulationTaskPath.simulation_id == simulation_id)
+        .order_by(SimulationTaskPath.sequence)
+    ).scalars().all()
+
+    if existing_paths:
+        first_entry = existing_paths[0]
+        first_task = db.get(Task, first_entry.task_id)
+        if first_task:
+            if first_task.status == TaskStatus.BACKLOG:
+                first_task.status = TaskStatus.TODO
+                db.add(first_task)
+            if first_entry.status == TaskStatus.BACKLOG:
+                first_entry.status = TaskStatus.TODO
+                db.add(first_entry)
+            simulation.current_task_id = first_task.id
+        from app.services.simulation.task_access_service import repair_current_task
+        repair_current_task(db, simulation)
+    elif body.task_ids:
         # Legacy mode: use explicit task path
         from app.services.simulation.task_path_builder import build_task_path
         path_entries = build_task_path(
@@ -380,24 +399,36 @@ async def start_simulation(
             first_task.status = TaskStatus.TODO
             db.add(first_task)
             
-            # Create path entry for the dynamic task
-            from app.models.task_path import SimulationTaskPath
-            path_entry = SimulationTaskPath(
-                simulation_id=simulation.id,
-                task_id=first_task.id,
-                sequence=1,
-                status=TaskStatus.TODO,
-            )
-            db.add(path_entry)
+            # Check if path entry already exists before adding
+            path_entry = db.execute(
+                select(SimulationTaskPath).where(
+                    SimulationTaskPath.simulation_id == simulation.id,
+                    SimulationTaskPath.sequence == 1,
+                )
+            ).scalar_one_or_none()
+            if path_entry is None:
+                path_entry = SimulationTaskPath(
+                    simulation_id=simulation.id,
+                    task_id=first_task.id,
+                    sequence=1,
+                    status=TaskStatus.TODO,
+                )
+                db.add(path_entry)
+            else:
+                path_entry.task_id = first_task.id
+                path_entry.status = TaskStatus.TODO
+                db.add(path_entry)
             
             # Set as current task
             simulation.current_task_id = first_task.id
+            simulation.status = SimulationStatus.IN_PROGRESS
             db.add(simulation)
             db.flush()
 
     if first_scenario and simulation.current_scenario_id != first_scenario.id:
         simulation.current_scenario_id = first_scenario.id
 
+    simulation.status = SimulationStatus.IN_PROGRESS
     db.add(simulation)
     db.flush()
     # Log activity
@@ -1884,18 +1915,30 @@ async def complete_simulation_task(
     """
     simulation = _get_owned_simulation(simulation_id, db, user)
     
-    _check_task_unlocked(db, simulation, task_id)
-    
     task = db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     
     if task.status == TaskStatus.COMPLETED:
+        from app.services.simulation.progression_service import progress_to_next_task
+        next_task = None
+        if simulation.current_task_id == task.id:
+            next_task = await progress_to_next_task(db, simulation, task, user.student_id)
+        elif simulation.current_task_id:
+            next_task = db.get(Task, simulation.current_task_id)
+        
         return {
             "status": "already_completed",
             "task_id": str(task.id),
             "message": "Task was already completed",
+            "next_task": {
+                "task_id": str(next_task.id),
+                "title": next_task.title,
+                "status": next_task.status.value,
+            } if next_task else None,
         }
+
+    _check_task_unlocked(db, simulation, task_id)
     
     if task.status != TaskStatus.MANAGER_APPROVAL:
         raise HTTPException(
